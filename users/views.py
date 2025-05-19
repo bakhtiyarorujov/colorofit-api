@@ -1,10 +1,92 @@
-from django.shortcuts import render
-from serializers import LoginSerializer
-from rest_framework import generics
+from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework import status
+from google.oauth2 import id_token
+from google.auth.transport import requests
 from django.contrib.auth import get_user_model
-
+from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
+from .utils import get_tokens_for_user
+from .serializers import GoogleTokenRequestSerializer, GoogleLoginResponseSerializer
 User = get_user_model()
-# Create your views here.
+
+
+
+@extend_schema(
+    request=GoogleTokenRequestSerializer,
+    responses={
+        200: OpenApiResponse(
+            response=GoogleLoginResponseSerializer,
+            description='Successful login with JWT tokens',
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        "user": {
+                            "id": 1,
+                            "email": "user@example.com",
+                            "first_name": "Jane",
+                            "last_name": "Doe"
+                        },
+                        "tokens": {
+                            "access": "<access_token>",
+                            "refresh": "<refresh_token>"
+                        }
+                    }
+                )
+            ]
+        ),
+        400: OpenApiResponse(
+            description="Invalid or missing token",
+            examples=[
+                OpenApiExample(
+                    'Missing token',
+                    value={"error": "Token is required"},
+                    status_codes=["400"]
+                ),
+                OpenApiExample(
+                    'Invalid token',
+                    value={"error": "Invalid token", "details": "Token verification failed"},
+                    status_codes=["400"]
+                )
+            ]
+        )
+    },
+    tags=["Authentication"],
+    summary="Google Sign-In",
+    description="Authenticate or register a user via Google ID token and return JWT access and refresh tokens."
+)
+class GoogleLoginAPIView(APIView):
+    def post(self, request):
+        token_id = request.data.get("token")
+
+        if not token_id:
+            return Response({"error": "Token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Replace with your actual Google client ID
+            idinfo = id_token.verify_oauth2_token(token_id, requests.Request(), "<YOUR_GOOGLE_CLIENT_ID>")
+
+            email = idinfo['email']
+            first_name = idinfo.get('given_name', '')
+            last_name = idinfo.get('family_name', '')
+
+            user, created = User.objects.get_or_create(email=email, defaults={
+                'username': email,
+                'first_name': first_name,
+                'last_name': last_name,
+            })
+
+            tokens = get_tokens_for_user(user)
+
+            return Response({
+                "user": {
+                    "id": user.id,
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                },
+                "tokens": tokens
+            })
+
+        except ValueError as e:
+            return Response({"error": "Invalid token", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
