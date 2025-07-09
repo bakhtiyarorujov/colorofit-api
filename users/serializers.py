@@ -34,7 +34,7 @@ class UserAimDetailSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'age',
-            'gender'
+            'gender',
             'height',
             'weight',
             'aimed_weight',
