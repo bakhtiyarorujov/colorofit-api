@@ -59,6 +59,7 @@ User = get_user_model()
     description="Authenticate or register a user via Google ID token and return JWT access and refresh tokens."
 )
 class GoogleLoginAPIView(APIView):
+    permission_classes = [AllowAny]
     def post(self, request):
         token_id = request.data.get("token")
 
