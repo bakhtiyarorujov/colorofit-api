@@ -68,8 +68,11 @@ class GoogleLoginAPIView(APIView):
 
         try:
             # Replace with your actual Google client ID
-            idinfo = id_token.verify_oauth2_token(token_id, requests.Request(), "<YOUR_GOOGLE_CLIENT_ID>")
-
+            idinfo = id_token.verify_oauth2_token(
+                token_id,
+                requests.Request(),
+                "197516977632-8vbn2h7a5slg421nojbge2ftgaasogeg.apps.googleusercontent.com"
+            )
             email = idinfo['email']
             first_name = idinfo.get('given_name', '')
             last_name = idinfo.get('family_name', '')
