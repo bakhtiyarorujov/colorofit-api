@@ -1,5 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from datetime import date
 from rest_framework import status
 from google.oauth2 import id_token
 from jose import jwt
@@ -189,3 +190,57 @@ class UserAimDetailUpdateView(UpdateAPIView):
 
     def get_object(self):
         return self.request.user
+    
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+
+        calculated_data = self.calculate_targets(instance)
+
+        return Response({
+            "message": "User data updated successfully.",
+            "data": serializer.data,
+            "targets": calculated_data,
+        }, status=status.HTTP_200_OK)
+
+    def calculate_targets(self, user):
+        weight = float(user.weight)
+        aimed_weight = float(user.aimed_weight)
+        height = float(user.height)
+        lifestyle = user.life_style  # e.g. "moderate"
+        aimed_date = user.aimed_date
+        gender = user.gender  # assume "male" or "female"
+        age = int(user.age)  # assume age is available
+
+        activity_factors = {
+            "sedentary": 1.2,
+            "light": 1.375,
+            "moderate": 1.55,
+            "active": 1.725,
+            "very_active": 1.9,
+        }
+
+        # Step 1: BMR
+        s = 5 if gender == "male" else -161
+        bmr = 10 * weight + 6.25 * height - 5 * age + s
+
+        # Step 2: TDEE
+        activity_factor = activity_factors.get(lifestyle, 1.2)
+        tdee = bmr * activity_factor
+
+        # Step 3: Calorie deficit and target
+        weight_loss_goal = weight - aimed_weight
+        days_left = max((aimed_date - date.today()).days, 1)  # avoid division by zero
+        total_deficit = weight_loss_goal * 7700
+        daily_deficit = total_deficit / days_left
+        calorie_target = tdee - daily_deficit
+
+        return {
+            "TDEE": round(tdee),
+            "daily_deficit": round(daily_deficit),
+            "calorie_target": round(calorie_target),
+            "days_left": days_left
+        }
