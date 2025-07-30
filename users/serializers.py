@@ -91,3 +91,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
     def get_days_left(self, obj):
         days_left = max((obj.aimed_date - date.today()).days, 1)
         return days_left
+
+
+class FoodRecognitionRequestSerializer(serializers.Serializer):
+    image = serializers.ImageField(required=True)

@@ -11,9 +11,18 @@ from .utils import get_tokens_for_user
 from rest_framework.generics import UpdateAPIView, RetrieveAPIView, ListAPIView
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import GoogleTokenRequestSerializer, GoogleLoginResponseSerializer \
-    , AppleLoginSerializer, AppleLoginResponseSerializer, UserAimDetailSerializer, TargetDetailSerializer
+    , AppleLoginSerializer, AppleLoginResponseSerializer, UserAimDetailSerializer, TargetDetailSerializer\
+    , FoodRecognitionRequestSerializer
+from clarifai.client.model import Model
+from django.core.files.uploadedfile import InMemoryUploadedFile
+import base64
+import requests as rq
 User = get_user_model()
 
+CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
+CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
+NUTRITIONIX_APP_ID = "26d50180"
+NUTRITIONIX_APP_KEY = "6e668f1850c515e975cb92818685fa82"
 
 @extend_schema(
     request=GoogleTokenRequestSerializer,
@@ -190,60 +199,7 @@ class UserAimDetailUpdateView(UpdateAPIView):
 
     def get_object(self):
         return self.request.user
-    
-    # def update(self, request, *args, **kwargs):
-    #     partial = kwargs.pop('partial', False)
-    #     instance = self.get_object()
-    #     serializer = self.get_serializer(instance, data=request.data, partial=partial)
-    #     serializer.is_valid(raise_exception=True)
-    #     self.perform_update(serializer)
 
-    #     calculated_data = self.calculate_targets(instance)
-
-    #     return Response({
-    #         "message": "User data updated successfully.",
-    #         "data": serializer.data,
-    #         "targets": calculated_data,
-    #     }, status=status.HTTP_200_OK)
-
-    # def calculate_targets(self, user):
-    #     weight = float(user.weight)
-    #     aimed_weight = float(user.aimed_weight)
-    #     height = float(user.height)
-    #     lifestyle = user.life_style  # e.g. "moderate"
-    #     aimed_date = user.aimed_date
-    #     gender = user.gender  # assume "male" or "female"
-    #     age = int(user.age)  # assume age is available
-
-    #     activity_factors = {
-    #         "sedentary": 1.2,
-    #         "light": 1.375,
-    #         "moderate": 1.55,
-    #         "active": 1.725,
-    #         "very_active": 1.9,
-    #     }
-
-    #     # Step 1: BMR
-    #     s = 5 if gender == "male" else -161
-    #     bmr = 10 * weight + 6.25 * height - 5 * age + s
-
-    #     # Step 2: TDEE
-    #     activity_factor = activity_factors.get(lifestyle, 1.2)
-    #     tdee = bmr * activity_factor
-
-    #     # Step 3: Calorie deficit and target
-    #     weight_loss_goal = weight - aimed_weight
-    #     days_left = max((aimed_date - date.today()).days, 1)  # avoid division by zero
-    #     total_deficit = weight_loss_goal * 7700
-    #     daily_deficit = total_deficit / days_left
-    #     calorie_target = tdee - daily_deficit
-
-    #     return {
-    #         "TDEE": round(tdee),
-    #         "daily_deficit": round(daily_deficit),
-    #         "calorie_target": round(calorie_target),
-    #         "days_left": days_left
-    #     }
 
 class TargetDetailView(RetrieveAPIView):
     serializer_class = TargetDetailSerializer
@@ -251,3 +207,150 @@ class TargetDetailView(RetrieveAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "food-item-v1-recognition", app_id: str = "main"):
+
+    url = f"https://api.clarifai.com/v2/models/{model_id}/outputs"
+
+    headers = {
+        "Authorization": f"Key {pat}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "user_app_id": {
+            "user_id": "clarifai",  # or your actual user ID
+            "app_id": app_id
+        },
+        "inputs": [
+            {
+                "data": {
+                    "image": {
+                        "base64": base64_image
+                    }
+                }
+            }
+        ]
+    }
+
+    response = rq.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_nutritionix_data(food_name: str):
+    url = "https://trackapi.nutritionix.com/v2/natural/nutrients"
+    headers = {
+        "x-app-id": NUTRITIONIX_APP_ID,
+        "x-app-key": NUTRITIONIX_APP_KEY,
+        "Content-Type": "application/json"
+    }
+    data = {"query": food_name}
+
+    response = rq.post(url, headers=headers, json=data)
+    if response.status_code != 200:
+        raise Exception(f"Nutritionix API error: {response.status_code}")
+
+    result = response.json()
+    food = result["foods"][0]
+
+    nutrient_id_to_key = {
+        301: 'calcium',
+        303: 'iron',
+        320: 'vitaminA',
+        401: 'vitaminC',
+    }
+
+    vitamins_and_minerals = {k: 0.0 for k in nutrient_id_to_key.values()}
+    for nutrient in food.get("full_nutrients", []):
+        attr_id = nutrient.get("attr_id")
+        value = nutrient.get("value")
+        if attr_id in nutrient_id_to_key:
+            vitamins_and_minerals[nutrient_id_to_key[attr_id]] = float(value or 0)
+
+    return {
+        "food_name": food.get("food_name"),
+        "calories": food.get("nf_calories", 0),
+        "protein": food.get("nf_protein", 0),
+        "fat": food.get("nf_total_fat", 0),
+        "saturated_fat": food.get("nf_saturated_fat", 0),
+        "trans_fat": food.get("nf_trans_fatty_acid", 0),
+        "carbohydrates": food.get("nf_total_carbohydrate", 0),
+        "fiber": food.get("nf_dietary_fiber", 0),
+        "sugar": food.get("nf_sugars", 0),
+        "cholesterol": food.get("nf_cholesterol", 0),
+        "sodium": food.get("nf_sodium", 0),
+        **vitamins_and_minerals,
+    }
+
+
+
+
+@extend_schema(
+    request=FoodRecognitionRequestSerializer,
+    responses={
+        200: OpenApiResponse(
+            description="Successfully recognized the food",
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={"prediction": "pizza"}
+                )
+            ]
+        ),
+        400: OpenApiResponse(
+            description="No image provided or invalid request",
+            examples=[
+                OpenApiExample(
+                    'No Image',
+                    value={"error": "No image provided"},
+                    status_codes=["400"]
+                )
+            ]
+        ),
+        500: OpenApiResponse(
+            description="Prediction error or internal server issue",
+            examples=[
+                OpenApiExample(
+                    'Prediction Failure',
+                    value={"error": "Model prediction failed"},
+                    status_codes=["500"]
+                )
+            ]
+        )
+    },
+    tags=["Food Recognition"],
+    summary="Recognize food from image",
+    description="Uploads an image and returns the top predicted food label using the Clarifai model."
+)
+class FoodRecognitionView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = FoodRecognitionRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        image_file = serializer.validated_data["image"]
+
+        try:
+            image_bytes = image_file.read()
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+            # Step 1: Predict food name
+            prediction = predict_clarifai_by_base64(base64_image, CLARIFAI_PAT)
+            concepts = prediction["outputs"][0]["data"]["concepts"]
+
+            if not concepts:
+                return Response({"error": "No prediction returned"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            food_name = concepts[0]["name"]  # Top prediction
+
+            # Step 2: Get nutrition data from Nutritionix
+            nutrition_data = get_nutritionix_data(food_name)
+
+            return Response(nutrition_data, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
