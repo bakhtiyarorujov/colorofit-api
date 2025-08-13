@@ -8,7 +8,7 @@ class LifeStyle(models.Model):
     activity_factor = models.DecimalField(max_digits=3, decimal_places=2)
 
 GENDER_CHOICES = [('female', 'Female'), ('male', 'Male'), ('other', 'Other')] 
-LifeStyle_CHOICES = [('sedentary', 'Sedentary'), ('light', 'Light'), ('moderate', 'Moderate'), ('active', 'Active'), ('very_active', 'Very Active')]
+LifeStyle_CHOICES = [('Sedentary', 'Sedentary'), ('Lightly active', 'Lightly active'), ('Moderately active', 'Moderately active'), ('Active', 'Active'), ('Very active', 'Very active')]
 
 class User(AbstractUser):
     profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)

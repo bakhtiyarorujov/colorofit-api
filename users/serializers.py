@@ -59,11 +59,11 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         )
     def get_tdee(self, obj):
         activity_factors = {
-            "sedentary": 1.2,
-            "light": 1.375,
-            "moderate": 1.55,
-            "active": 1.725,
-            "very_active": 1.9,
+            "Sedentary": 1.2,
+            "Lightly active": 1.375,
+            "Moderately active": 1.55,
+            "Active": 1.725,
+            "Very active": 1.9,
         }
         # Step 1: BMR
         s = 5 if obj.gender == "male" else -161
