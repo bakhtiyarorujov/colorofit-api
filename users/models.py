@@ -18,6 +18,7 @@ class User(AbstractUser):
     weight = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     aimed_weight = models.DecimalField(max_digits=5, decimal_places=2, blank=True, null=True)
     aimed_date = models.DateField(blank=True, null=True)
+    aimed_water_intake = models.DecimalField(max_digits=3, decimal_places=2, default=2.0)  # in liters
     age = models.PositiveIntegerField(blank=True, null=True)
     life_style = models.CharField(max_length=20, choices=LifeStyle_CHOICES, blank=True, null=True)
     

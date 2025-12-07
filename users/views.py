@@ -192,7 +192,9 @@ class AppleLoginAPIView(APIView):
         except jwt.JWTError as e:
             return Response({"error": "Invalid Apple token", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         
-
+@extend_schema(
+    tags=["User"]
+)
 class UserAimDetailUpdateView(UpdateAPIView):
     serializer_class = UserAimDetailSerializer
     permission_classes = [IsAuthenticated]
@@ -200,7 +202,9 @@ class UserAimDetailUpdateView(UpdateAPIView):
     def get_object(self):
         return self.request.user
 
-
+@extend_schema(
+    tags=["User"]
+)
 class TargetDetailView(RetrieveAPIView):
     serializer_class = TargetDetailSerializer
     permission_classes = [IsAuthenticated]
