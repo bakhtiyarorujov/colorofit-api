@@ -1,6 +1,6 @@
 # urls.py
 from django.urls import path
-from .views import GoogleLoginAPIView, AppleLoginAPIView, UserAimDetailUpdateView, TargetDetailView, FoodRecognitionView
+from .views import GoogleLoginAPIView, AppleLoginAPIView, UserAimDetailUpdateView, TargetDetailView
 
 urlpatterns = [
     path('auth/google/', GoogleLoginAPIView.as_view(), name='google-login'),

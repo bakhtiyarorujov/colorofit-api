@@ -93,5 +93,3 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         return days_left
 
 
-class FoodRecognitionRequestSerializer(serializers.Serializer):
-    image = serializers.ImageField(required=True)
