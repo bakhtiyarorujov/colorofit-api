@@ -7,9 +7,11 @@ class FoodRecognitionRequestSerializer(serializers.Serializer):
 
 
 class FoodItemSerializer(serializers.ModelSerializer):
+    meal_type_name = serializers.CharField(source='meal_type.name', read_only=True, allow_null=True)
+    
     class Meta:
         model = FoodItem
-        fields = ['id', 'name', 'calories', 'protein', 'carbohydrates', 'fats', 'meal_type', 'date']
+        fields = ['id', 'name', 'calories', 'protein', 'carbohydrates', 'fats', 'meal_type', 'meal_type_name', 'date']
 
 
 class FoodItemUpdateSerializer(serializers.ModelSerializer):

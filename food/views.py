@@ -1,12 +1,12 @@
-from django.shortcuts import render
 import base64
+from datetime import date
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
 from rest_framework.views import APIView
 from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework import status
 import requests as rq
-from .models import FoodItem, MealType, WaterIntake, WaterIntakeType
+from .models import FoodItem, WaterIntake, WaterIntakeType
 from rest_framework.permissions import IsAuthenticated
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
     , WaterIntakeSerializer
@@ -176,7 +176,7 @@ class FoodRecognitionView(APIView):
 @extend_schema(
     tags=["Food"],
     summary="Get food items by date",
-    description="Retrieve a list of food items consumed by the user on a specific date.",
+    description="Retrieve a list of food items consumed by the user on a specific date, grouped by meal type (breakfast, lunch, snacks, dinner).",
     parameters=[
         OpenApiParameter(
             name='date', 
@@ -186,23 +186,55 @@ class FoodRecognitionView(APIView):
         ),
     ]
 )
-class FoodItemByDateView(generics.ListAPIView):
-    serializer_class = FoodItemSerializer
+class FoodItemByDateView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def get_queryset(self):
+    def get(self, request):
         # 1. Start with all items belonging to the current user
-        queryset = FoodItem.objects.filter(user=self.request.user)
+        queryset = FoodItem.objects.filter(user=request.user)
         
         # 2. Get the date from URL parameters (e.g., ?date=2025-12-08)
-        date_param = self.request.query_params.get('date')
+        date_param = request.query_params.get('date')
 
         # 3. Apply the filter if the date exists
         if date_param:
             # We use 'date__date' to ignore the time component and match only the day
             queryset = queryset.filter(date__date=date_param)
             
-        return queryset.order_by('-date')
+        queryset = queryset.order_by('-date').select_related('meal_type')
+        
+        # 4. Group food items by meal type
+        grouped_data = {
+            'breakfast': [],
+            'lunch': [],
+            'snacks': [],
+            'dinner': []
+        }
+        
+        # Serialize each food item and group by meal type
+        serializer = FoodItemSerializer(queryset, many=True)
+        
+        for item_data in serializer.data:
+            meal_type_name = item_data.get('meal_type_name', '').lower() if item_data.get('meal_type_name') else None
+            
+            # Normalize meal type name to match our keys
+            if meal_type_name:
+                if 'breakfast' in meal_type_name:
+                    grouped_data['breakfast'].append(item_data)
+                elif 'lunch' in meal_type_name:
+                    grouped_data['lunch'].append(item_data)
+                elif 'snack' in meal_type_name:
+                    grouped_data['snacks'].append(item_data)
+                elif 'dinner' in meal_type_name:
+                    grouped_data['dinner'].append(item_data)
+                else:
+                    # If meal type doesn't match, add to snacks as default
+                    grouped_data['snacks'].append(item_data)
+            else:
+                # If no meal type, add to snacks as default
+                grouped_data['snacks'].append(item_data)
+        
+        return Response(grouped_data, status=status.HTTP_200_OK)
     
 
 @extend_schema(
