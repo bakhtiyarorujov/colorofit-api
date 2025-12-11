@@ -49,6 +49,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
     daily_deficit = serializers.SerializerMethodField()
     calorie_target = serializers.SerializerMethodField()
     days_left = serializers.SerializerMethodField()
+
     class Meta:
         model = User
         fields = (
@@ -57,7 +58,12 @@ class TargetDetailSerializer(serializers.ModelSerializer):
             'calorie_target',
             'days_left'
         )
+
     def get_tdee(self, obj):
+        # Safety Check: If any required field is missing, return 0
+        if not all([obj.weight, obj.height, obj.age, obj.gender]):
+            return 0
+
         activity_factors = {
             "Sedentary": 1.2,
             "Lightly active": 1.375,
@@ -65,9 +71,13 @@ class TargetDetailSerializer(serializers.ModelSerializer):
             "Active": 1.725,
             "Very active": 1.9,
         }
+        
         # Step 1: BMR
         s = 5 if obj.gender == "male" else -161
-        bmr = 10 * float(obj.weight) + 6.25 * float(obj.height) - 5 * float(obj.age) + s
+        try:
+            bmr = 10 * float(obj.weight) + 6.25 * float(obj.height) - 5 * float(obj.age) + s
+        except (ValueError, TypeError):
+            return 0
 
         # Step 2: TDEE
         activity_factor = activity_factors.get(obj.life_style, 1.2)
@@ -75,21 +85,37 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         return round(tdee)
     
     def get_daily_deficit(self, obj):
-        # Step 3: Calorie deficit and target
-        weight_loss_goal = float(obj.weight) - float(obj.aimed_weight)
-        days_left = max((obj.aimed_date - date.today()).days, 1)  # avoid division by zero
-        total_deficit = weight_loss_goal * 7700
-        daily_deficit = total_deficit / days_left
-        return round(daily_deficit)
+        # Safety Check
+        if not all([obj.weight, obj.aimed_weight, obj.aimed_date]):
+            return 0
+
+        try:
+            weight_loss_goal = float(obj.weight) - float(obj.aimed_weight)
+            # Ensure days_left isn't negative or zero to prevent weird math
+            days_left = max((obj.aimed_date - date.today()).days, 1)  
+            
+            total_deficit = weight_loss_goal * 7700
+            daily_deficit = total_deficit / days_left
+            return round(daily_deficit)
+        except (ValueError, TypeError):
+            return 0
     
     def get_calorie_target(self, obj):
         tdee = self.get_tdee(obj)
         daily_deficit = self.get_daily_deficit(obj)
+        
+        # If tdee is 0 (data missing), target cannot be calculated
+        if tdee == 0:
+            return 0
+            
         calorie_target = tdee - daily_deficit
-        return round(calorie_target)
+        
+        # Prevent negative targets (if someone sets unrealistic goals)
+        return max(round(calorie_target), 1200) # 1200 is a safe minimum floor
     
     def get_days_left(self, obj):
-        days_left = max((obj.aimed_date - date.today()).days, 1)
-        return days_left
+        if not obj.aimed_date:
+            return 0
+        return max((obj.aimed_date - date.today()).days, 0)
 
 
