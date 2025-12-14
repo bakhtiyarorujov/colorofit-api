@@ -17,7 +17,6 @@ CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recogn
 CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
 NUTRITIONIX_APP_ID = "26d50180"
 NUTRITIONIX_APP_KEY = "6e668f1850c515e975cb92818685fa82"
-SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
 # Create your views here.
 
 User = get_user_model()
@@ -102,118 +101,6 @@ def get_nutritionix_data(food_name: str):
     }
 
 
-def get_spoonacular_nutrition_from_image(image_bytes: bytes):
-    """
-    Spoonacular API istifadə edərək şəkildən makro və mikro elementləri alır.
-    """
-    url = "https://api.spoonacular.com/recipes/guessNutrition"
-    
-    files = {
-        'file': ('image.jpg', image_bytes, 'image/jpeg')
-    }
-    
-    params = {
-        'apiKey': SPOONACULAR_API_KEY
-    }
-    
-    response = rq.post(url, files=files, params=params)
-    
-    if response.status_code != 200:
-        raise Exception(f"Spoonacular API error: {response.status_code} - {response.text}")
-    
-    result = response.json()
-    
-    # Spoonacular-dan gələn məlumatları formatla
-    calories = result.get("calories", {}).get("value", 0)
-    protein = result.get("protein", {}).get("value", 0)
-    fat = result.get("fat", {}).get("value", 0)
-    carbs = result.get("carbs", {}).get("value", 0)
-    
-    # Mikro elementlər
-    vitamins = result.get("vitamins", {})
-    minerals = result.get("minerals", {})
-    
-    # Vitaminlər
-    vitamin_a = vitamins.get("A", {}).get("value", 0) if vitamins.get("A") else 0
-    vitamin_c = vitamins.get("C", {}).get("value", 0) if vitamins.get("C") else 0
-    vitamin_d = vitamins.get("D", {}).get("value", 0) if vitamins.get("D") else 0
-    vitamin_e = vitamins.get("E", {}).get("value", 0) if vitamins.get("E") else 0
-    vitamin_k = vitamins.get("K", {}).get("value", 0) if vitamins.get("K") else 0
-    vitamin_b1 = vitamins.get("B1", {}).get("value", 0) if vitamins.get("B1") else 0
-    vitamin_b2 = vitamins.get("B2", {}).get("value", 0) if vitamins.get("B2") else 0
-    vitamin_b3 = vitamins.get("B3", {}).get("value", 0) if vitamins.get("B3") else 0
-    vitamin_b5 = vitamins.get("B5", {}).get("value", 0) if vitamins.get("B5") else 0
-    vitamin_b6 = vitamins.get("B6", {}).get("value", 0) if vitamins.get("B6") else 0
-    vitamin_b12 = vitamins.get("B12", {}).get("value", 0) if vitamins.get("B12") else 0
-    folate = vitamins.get("FOLATE", {}).get("value", 0) if vitamins.get("FOLATE") else 0
-    
-    # Minerallar
-    calcium = minerals.get("CA", {}).get("value", 0) if minerals.get("CA") else 0
-    iron = minerals.get("FE", {}).get("value", 0) if minerals.get("FE") else 0
-    magnesium = minerals.get("MG", {}).get("value", 0) if minerals.get("MG") else 0
-    phosphorus = minerals.get("P", {}).get("value", 0) if minerals.get("P") else 0
-    potassium = minerals.get("K", {}).get("value", 0) if minerals.get("K") else 0
-    sodium = minerals.get("NA", {}).get("value", 0) if minerals.get("NA") else 0
-    zinc = minerals.get("ZN", {}).get("value", 0) if minerals.get("ZN") else 0
-    copper = minerals.get("CU", {}).get("value", 0) if minerals.get("CU") else 0
-    manganese = minerals.get("MN", {}).get("value", 0) if minerals.get("MN") else 0
-    selenium = minerals.get("SE", {}).get("value", 0) if minerals.get("SE") else 0
-    
-    # Əlavə makro elementlər
-    fiber = result.get("fiber", {}).get("value", 0) if result.get("fiber") else 0
-    sugar = result.get("sugar", {}).get("value", 0) if result.get("sugar") else 0
-    saturated_fat = result.get("saturatedFat", {}).get("value", 0) if result.get("saturatedFat") else 0
-    trans_fat = result.get("transFat", {}).get("value", 0) if result.get("transFat") else 0
-    cholesterol = result.get("cholesterol", {}).get("value", 0) if result.get("cholesterol") else 0
-    
-    # Yemək adı
-    food_name = result.get("title", "Unknown Food")
-    
-    return {
-        "food_name": food_name,
-        "name": food_name,  # Flutter app expects both 'food_name' and 'name'
-        "calories": float(calories) if calories else 0,
-        "protein": float(protein) if protein else 0,
-        # Flutter app expects camelCase for some fields
-        "fat": float(fat) if fat else 0,  # For database
-        "totalFat": float(fat) if fat else 0,  # For Flutter app
-        "saturated_fat": float(saturated_fat) if saturated_fat else 0,  # For database
-        "saturatedFat": float(saturated_fat) if saturated_fat else 0,  # For Flutter app
-        "trans_fat": float(trans_fat) if trans_fat else 0,  # For database
-        "transFat": float(trans_fat) if trans_fat else 0,  # For Flutter app
-        "carbohydrates": float(carbs) if carbs else 0,  # For database
-        "carbs": float(carbs) if carbs else 0,  # For Flutter app
-        "fiber": float(fiber) if fiber else 0,
-        "sugar": float(sugar) if sugar else 0,
-        "cholesterol": float(cholesterol) if cholesterol else 0,
-        "sodium": float(sodium) if sodium else 0,
-        # Vitaminlər
-        "vitaminA": float(vitamin_a) if vitamin_a else 0,
-        "vitaminC": float(vitamin_c) if vitamin_c else 0,
-        "vitaminD": float(vitamin_d) if vitamin_d else 0,
-        "vitaminE": float(vitamin_e) if vitamin_e else 0,
-        "vitaminK": float(vitamin_k) if vitamin_k else 0,
-        "vitaminB1": float(vitamin_b1) if vitamin_b1 else 0,
-        "vitaminB2": float(vitamin_b2) if vitamin_b2 else 0,
-        "vitaminB3": float(vitamin_b3) if vitamin_b3 else 0,
-        "vitaminB5": float(vitamin_b5) if vitamin_b5 else 0,
-        "vitaminB6": float(vitamin_b6) if vitamin_b6 else 0,
-        "vitaminB12": float(vitamin_b12) if vitamin_b12 else 0,
-        "folate": float(folate) if folate else 0,
-        # Minerallar
-        "calcium": float(calcium) if calcium else 0,
-        "iron": float(iron) if iron else 0,
-        "magnesium": float(magnesium) if magnesium else 0,
-        "phosphorus": float(phosphorus) if phosphorus else 0,
-        "potassium": float(potassium) if potassium else 0,
-        "zinc": float(zinc) if zinc else 0,
-        "copper": float(copper) if copper else 0,
-        "manganese": float(manganese) if manganese else 0,
-        "selenium": float(selenium) if selenium else 0,
-    }
-
-
-
 @extend_schema(
     request=FoodRecognitionRequestSerializer,
     responses={
@@ -251,11 +138,21 @@ class FoodRecognitionView(APIView):
 
         try:
             image_bytes = image_file.read()
-            
-            # Spoonacular API istifadə edərək şəkildən birbaşa makro və mikro elementləri al
-            nutrition_data = get_spoonacular_nutrition_from_image(image_bytes)
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-            # FoodItem object yarat
+            # Step 1: Predict food name
+            prediction = predict_clarifai_by_base64(base64_image, CLARIFAI_PAT)
+            concepts = prediction["outputs"][0]["data"]["concepts"]
+
+            if not concepts:
+                return Response({"error": "No prediction returned"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+            food_name = concepts[0]["name"]
+
+            # Step 2: Get nutrition data
+            nutrition_data = get_nutritionix_data(food_name)
+
+            # Step 3: Create FoodItem object
             # We use request.user because permission_classes=[IsAuthenticated]
             food_item = FoodItem.objects.create(
                 user=request.user,
@@ -270,7 +167,6 @@ class FoodRecognitionView(APIView):
             # Prepare response data (combine API data with the new DB ID)
             response_data = nutrition_data.copy()
             response_data['id'] = food_item.id
-            response_data['name'] = nutrition_data['food_name']  # Flutter app expects 'name' field
             response_data['created_at'] = food_item.date
 
             return Response(response_data, status=status.HTTP_201_CREATED)
