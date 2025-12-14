@@ -4,7 +4,6 @@ from .models import FoodItem, WaterIntake
 
 class FoodRecognitionRequestSerializer(serializers.Serializer):
     image = serializers.ImageField(required=True)
-    servings = serializers.IntegerField(required=False, default=1, min_value=1, max_value=100)
 
 
 class FoodItemSerializer(serializers.ModelSerializer):

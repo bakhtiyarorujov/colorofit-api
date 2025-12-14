@@ -163,11 +163,3 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# API Keys - Use environment variables for production
-# Set these in your .env file or environment variables
-SPOONACULAR_API_KEY = os.environ.get('SPOONACULAR_API_KEY', '1a5198d38ce94b5ca46b6dc2f8e31cf3')
-CLARIFAI_PAT = os.environ.get('CLARIFAI_PAT', '')
-
-# Validate required API keys
-if not SPOONACULAR_API_KEY and not DEBUG:
-    raise ValueError("SPOONACULAR_API_KEY must be set in production environment")

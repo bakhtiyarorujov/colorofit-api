@@ -51,4 +51,3 @@ uritemplate==4.1.1
 urllib3==2.4.0
 uv==0.7.12
 yarl==1.20.1
-easyocr==1.7.1

@@ -1,20 +1,23 @@
-import logging
+import base64
 from datetime import date
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
 from rest_framework.views import APIView
 from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework import status
-from django.conf import settings
+import requests as rq
 from .models import FoodItem, WaterIntake, WaterIntakeType
 from rest_framework.permissions import IsAuthenticated
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
     , WaterIntakeSerializer
 from django.db.models import Sum
 from django.contrib.auth import get_user_model
-from .services import OCRService, IngredientParser, SpoonacularService
 
-logger = logging.getLogger(__name__)
+CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
+CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
+NUTRITIONIX_APP_ID = "26d50180"
+NUTRITIONIX_APP_KEY = "6e668f1850c515e975cb92818685fa82"
+# Create your views here.
 
 User = get_user_model()
 
@@ -22,153 +25,156 @@ User = get_user_model()
 
 
 
+def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "food-item-v1-recognition", app_id: str = "main"):
+
+    url = f"https://api.clarifai.com/v2/models/{model_id}/outputs"
+
+    headers = {
+        "Authorization": f"Key {pat}",
+        "Content-Type": "application/json"
+    }
+
+    data = {
+        "user_app_id": {
+            "user_id": "clarifai",  # or your actual user ID
+            "app_id": app_id
+        },
+        "inputs": [
+            {
+                "data": {
+                    "image": {
+                        "base64": base64_image
+                    }
+                }
+            }
+        ]
+    }
+
+    response = rq.post(url, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()
+
+
+def get_nutritionix_data(food_name: str):
+    url = "https://trackapi.nutritionix.com/v2/natural/nutrients"
+    headers = {
+        "x-app-id": NUTRITIONIX_APP_ID,
+        "x-app-key": NUTRITIONIX_APP_KEY,
+        "Content-Type": "application/json"
+    }
+    data = {"query": food_name}
+
+    response = rq.post(url, headers=headers, json=data)
+    if response.status_code != 200:
+        raise Exception(f"Nutritionix API error: {response.status_code}")
+
+    result = response.json()
+    food = result["foods"][0]
+
+    nutrient_id_to_key = {
+        301: 'calcium',
+        303: 'iron',
+        320: 'vitaminA',
+        401: 'vitaminC',
+    }
+
+    vitamins_and_minerals = {k: 0.0 for k in nutrient_id_to_key.values()}
+    for nutrient in food.get("full_nutrients", []):
+        attr_id = nutrient.get("attr_id")
+        value = nutrient.get("value")
+        if attr_id in nutrient_id_to_key:
+            vitamins_and_minerals[nutrient_id_to_key[attr_id]] = float(value or 0)
+
+    return {
+        "food_name": food.get("food_name"),
+        "calories": food.get("nf_calories", 0),
+        "protein": food.get("nf_protein", 0),
+        "fat": food.get("nf_total_fat", 0),
+        "saturated_fat": food.get("nf_saturated_fat", 0),
+        "trans_fat": food.get("nf_trans_fatty_acid", 0),
+        "carbohydrates": food.get("nf_total_carbohydrate", 0),
+        "fiber": food.get("nf_dietary_fiber", 0),
+        "sugar": food.get("nf_sugars", 0),
+        "cholesterol": food.get("nf_cholesterol", 0),
+        "sodium": food.get("nf_sodium", 0),
+        **vitamins_and_minerals,
+    }
+
+
+
 @extend_schema(
     request=FoodRecognitionRequestSerializer,
     responses={
         201: OpenApiResponse(
-            description="Successfully extracted recipe, analyzed nutrition, and saved to database",
+            description="Successfully recognized food and saved to database",
             examples=[
                 OpenApiExample(
                     'Success',
                     value={
                         "id": 15,
-                        "food_name": "Chicken Pasta",
-                        "calories": 450.5,
-                        "protein": 25.3,
-                        "carbohydrates": 45.2,
-                        "fats": 15.8,
-                        "servings": 2,
-                        "created_at": "2025-12-11T10:30:00Z"
+                        "food_name": "pizza",
+                        "calories": 266,
+                        "protein": 11,
+                        "carbohydrates": 33,
+                        "fat": 10
                     }
                 )
             ]
         ),
-        400: OpenApiResponse(description="Invalid input or validation error"),
-        500: OpenApiResponse(description="Server error during processing"),
+        # ... other error responses (400, 500) remain the same
     },
     tags=["Food"],
-    summary="Analyze Recipe from Image",
-    description=(
-        "Uploads an image of a food recipe, extracts text using OCR, "
-        "normalizes ingredients, and calculates nutrition data using Spoonacular API. "
-        "Saves the recipe as a FoodItem in the database."
-    )
+    summary="Recognize and Save Food",
+    description="Uploads an image, recognizes the food, fetches nutrition data, and saves a FoodItem to the database."
 )
 class FoodRecognitionView(APIView):
-    """
-    API endpoint for analyzing recipe images and extracting nutrition data.
-    
-    Process:
-    1. Extract text from recipe image using OCR
-    2. Normalize text into ingredient lines
-    3. Analyze nutrition using Spoonacular API
-    4. Save to database as FoodItem
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        """
-        Process recipe image and return nutrition data.
-        
-        Expected input:
-        - image: Image file (JPEG, PNG, etc.)
-        - servings: Optional integer (default: 1)
-        """
-        # Validate input
         serializer = FoodRecognitionRequestSerializer(data=request.data)
         if not serializer.is_valid():
-            logger.warning(f"Invalid request data: {serializer.errors}")
-            return Response(
-                {"error": "Invalid input", "details": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         image_file = serializer.validated_data["image"]
-        servings = serializer.validated_data.get("servings", 1)
 
         try:
-            # Step 1: Extract text from image using OCR
-            logger.info("Starting OCR text extraction")
-            ocr_service = OCRService()
-            raw_text = ocr_service.extract_text(image_file)
-            
-            if not raw_text or len(raw_text.strip()) < 10:
-                return Response(
-                    {"error": "Could not extract sufficient text from image. Please ensure the image contains readable recipe text."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            image_bytes = image_file.read()
+            base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-            # Step 2: Normalize text into ingredient lines
-            logger.info("Normalizing ingredient text")
-            ingredient_parser = IngredientParser()
-            ingredient_lines = ingredient_parser.normalize_text(raw_text)
-            
-            if not ingredient_lines:
-                return Response(
-                    {"error": "Could not parse ingredients from extracted text. Please ensure the image contains a valid recipe."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            # Step 1: Predict food name
+            prediction = predict_clarifai_by_base64(base64_image, CLARIFAI_PAT)
+            concepts = prediction["outputs"][0]["data"]["concepts"]
 
-            # Step 3: Format ingredients for Spoonacular API
-            formatted_ingredients = ingredient_parser.format_for_spoonacular(ingredient_lines)
+            if not concepts:
+                return Response({"error": "No prediction returned"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-            # Step 4: Get nutrition data from Spoonacular
-            logger.info(f"Analyzing nutrition for {len(ingredient_lines)} ingredients")
-            spoonacular_service = SpoonacularService()
-            nutrition_data = spoonacular_service.analyze_recipe_nutrition(
-                formatted_ingredients,
-                servings=servings
-            )
+            food_name = concepts[0]["name"]
 
-            # Step 5: Create FoodItem object
+            # Step 2: Get nutrition data
+            nutrition_data = get_nutritionix_data(food_name)
+
+            # Step 3: Create FoodItem object
+            # We use request.user because permission_classes=[IsAuthenticated]
             food_item = FoodItem.objects.create(
                 user=request.user,
                 name=nutrition_data['food_name'],
                 calories=nutrition_data['calories'],
                 protein=nutrition_data['protein'],
                 carbohydrates=nutrition_data['carbohydrates'],
-                fats=nutrition_data['fats'],
+                fats=nutrition_data['fat'], # Note: Model field is 'fats', helper key is 'fat'
+                # meal_type is left null as it wasn't provided in the request
             )
 
-            # Step 6: Prepare response data with macros and micros
-            response_data = {
-                'id': food_item.id,
-                'food_name': nutrition_data['food_name'],
-                # Macronutrients
-                'calories': nutrition_data['calories'],
-                'protein': nutrition_data['protein'],
-                'carbohydrates': nutrition_data['carbohydrates'],
-                'fats': nutrition_data['fats'],
-                'fiber': nutrition_data.get('fiber', 0),
-                'sugar': nutrition_data.get('sugar', 0),
-                'saturated_fat': nutrition_data.get('saturated_fat', 0),
-                'trans_fat': nutrition_data.get('trans_fat', 0),
-                'cholesterol': nutrition_data.get('cholesterol', 0),
-                'sodium': nutrition_data.get('sodium', 0),
-                # Micronutrients
-                'vitamins': nutrition_data.get('vitamins', {}),
-                'minerals': nutrition_data.get('minerals', {}),
-                # Other
-                'servings': nutrition_data.get('servings', servings),
-                'created_at': food_item.date,
-                'ingredients_count': len(ingredient_lines),
-            }
+            # Prepare response data (combine API data with the new DB ID)
+            response_data = nutrition_data.copy()
+            response_data['id'] = food_item.id
+            response_data['created_at'] = food_item.date
 
-            logger.info(f"Successfully processed recipe: {nutrition_data['food_name']}")
             return Response(response_data, status=status.HTTP_201_CREATED)
 
-        except ValueError as e:
-            logger.error(f"Validation error: {e}")
-            return Response(
-                {"error": "Invalid input", "details": str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
         except Exception as e:
-            logger.error(f"Unexpected error processing recipe: {e}", exc_info=True)
-            return Response(
-                {"error": "Failed to process recipe image", "details": str(e)},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+            # It is good practice to log the specific error here for debugging
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @extend_schema(
     tags=["Food"],
