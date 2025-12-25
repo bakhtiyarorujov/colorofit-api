@@ -386,10 +386,30 @@ class FoodItemByDateView(APIView):
         # 2. Get the date from URL parameters (e.g., ?date=2025-12-08)
         date_param = request.query_params.get('date')
 
-        # 3. Apply the filter if the date exists
+        # 3. Apply the filter - if date provided use it, otherwise use today
+        from datetime import datetime, timedelta
         if date_param:
-            # We use 'date__date' to ignore the time component and match only the day
-            queryset = queryset.filter(date__date=date_param)
+            # Parse the date string and filter by date (ignoring time)
+            try:
+                target_date = datetime.strptime(date_param, '%Y-%m-%d').date()
+                # Filter by date range (start of day to end of day)
+                start_datetime = datetime.combine(target_date, datetime.min.time())
+                end_datetime = start_datetime + timedelta(days=1)
+                queryset = queryset.filter(date__gte=start_datetime, date__lt=end_datetime)
+            except ValueError:
+                # If date format is invalid, return empty result
+                return Response({
+                    'breakfast': [],
+                    'lunch': [],
+                    'snacks': [],
+                    'dinner': []
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # If no date provided, default to today
+            today = date.today()
+            start_datetime = datetime.combine(today, datetime.min.time())
+            end_datetime = start_datetime + timedelta(days=1)
+            queryset = queryset.filter(date__gte=start_datetime, date__lt=end_datetime)
             
         queryset = queryset.order_by('-date').select_related('meal_type')
         
