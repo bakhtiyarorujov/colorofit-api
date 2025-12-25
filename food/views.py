@@ -6,7 +6,7 @@ from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework import status
 import requests as rq
-from .models import FoodItem, WaterIntake, WaterIntakeType
+from .models import FoodItem, WaterIntake
 from rest_framework.permissions import IsAuthenticated
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
     , WaterIntakeSerializer
@@ -15,8 +15,7 @@ from django.contrib.auth import get_user_model
 
 CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
 CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
-NUTRITIONIX_APP_ID = "26d50180"
-NUTRITIONIX_APP_KEY = "6e668f1850c515e975cb92818685fa82"
+SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
 # Create your views here.
 
 User = get_user_model()
@@ -50,54 +49,86 @@ def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "foo
         ]
     }
 
-    response = rq.post(url, headers=headers, json=data)
+    response = rq.post(url, headers=headers, json=data, timeout=30)
     response.raise_for_status()
     return response.json()
 
 
-def get_nutritionix_data(food_name: str):
-    url = "https://trackapi.nutritionix.com/v2/natural/nutrients"
-    headers = {
-        "x-app-id": NUTRITIONIX_APP_ID,
-        "x-app-key": NUTRITIONIX_APP_KEY,
-        "Content-Type": "application/json"
-    }
-    data = {"query": food_name}
+class SpoonacularAPIError(Exception):
+    """Custom exception for Spoonacular API errors"""
 
-    response = rq.post(url, headers=headers, json=data)
+
+class SpoonacularDataError(Exception):
+    """Custom exception for Spoonacular data parsing errors"""
+
+
+def get_spoonacular_data(food_name: str):
+    """
+    Get nutrition data from Spoonacular API for a given food name.
+    Uses complexSearch endpoint with addRecipeNutrition=true to get nutrition info.
+    """
+    url = "https://api.spoonacular.com/recipes/complexSearch"
+    params = {
+        "query": food_name,
+        "number": 1,
+        "addRecipeNutrition": "true",
+        "apiKey": SPOONACULAR_API_KEY
+    }
+
+    try:
+        response = rq.get(url, params=params, timeout=30)
+    except rq.exceptions.RequestException as e:
+        raise SpoonacularAPIError(f"Spoonacular API request failed: {str(e)}") from e
+    
     if response.status_code != 200:
-        raise Exception(f"Nutritionix API error: {response.status_code}")
+        error_text = response.text[:200] if response.text else "No error details"
+        raise SpoonacularAPIError(f"Spoonacular API error: {response.status_code} - {error_text}")
 
-    result = response.json()
-    food = result["foods"][0]
+    try:
+        result = response.json()
+    except ValueError as e:
+        raise SpoonacularDataError(f"Invalid JSON response from Spoonacular API: {str(e)}") from e
 
-    nutrient_id_to_key = {
-        301: 'calcium',
-        303: 'iron',
-        320: 'vitaminA',
-        401: 'vitaminC',
-    }
+    results = result.get("results", [])
+    
+    if not results:
+        raise SpoonacularDataError(f"No results found for food: {food_name}")
 
-    vitamins_and_minerals = {k: 0.0 for k in nutrient_id_to_key.values()}
-    for nutrient in food.get("full_nutrients", []):
-        attr_id = nutrient.get("attr_id")
-        value = nutrient.get("value")
-        if attr_id in nutrient_id_to_key:
-            vitamins_and_minerals[nutrient_id_to_key[attr_id]] = float(value or 0)
+    recipe = results[0]
+    nutrition = recipe.get("nutrition", {})
+    
+    if not nutrition:
+        raise SpoonacularDataError(f"No nutrition data found for food: {food_name}")
+    
+    nutrients = nutrition.get("nutrients", [])
 
+    if not nutrients:
+        raise SpoonacularDataError(f"No nutrients found in nutrition data for food: {food_name}")
+
+    # Create a dictionary to map nutrient names to their values
+    nutrient_map = {}
+    for nutrient in nutrients:
+        name = nutrient.get("name", "").lower()
+        amount = nutrient.get("amount", 0)
+        nutrient_map[name] = float(amount or 0)
+
+    # Extract nutrition values with fallbacks
     return {
-        "food_name": food.get("food_name"),
-        "calories": food.get("nf_calories", 0),
-        "protein": food.get("nf_protein", 0),
-        "fat": food.get("nf_total_fat", 0),
-        "saturated_fat": food.get("nf_saturated_fat", 0),
-        "trans_fat": food.get("nf_trans_fatty_acid", 0),
-        "carbohydrates": food.get("nf_total_carbohydrate", 0),
-        "fiber": food.get("nf_dietary_fiber", 0),
-        "sugar": food.get("nf_sugars", 0),
-        "cholesterol": food.get("nf_cholesterol", 0),
-        "sodium": food.get("nf_sodium", 0),
-        **vitamins_and_minerals,
+        "food_name": recipe.get("title", food_name),
+        "calories": nutrient_map.get("calories", 0),
+        "protein": nutrient_map.get("protein", 0),
+        "fat": nutrient_map.get("fat", 0),
+        "saturated_fat": nutrient_map.get("saturated fat", 0),
+        "trans_fat": nutrient_map.get("trans fat", 0),
+        "carbohydrates": nutrient_map.get("carbohydrates", 0),
+        "fiber": nutrient_map.get("fiber", 0),
+        "sugar": nutrient_map.get("sugar", 0),
+        "cholesterol": nutrient_map.get("cholesterol", 0),
+        "sodium": nutrient_map.get("sodium", 0),
+        "calcium": nutrient_map.get("calcium", 0),
+        "iron": nutrient_map.get("iron", 0),
+        "vitaminA": nutrient_map.get("vitamin a", 0),
+        "vitaminC": nutrient_map.get("vitamin c", 0),
     }
 
 
@@ -149,12 +180,12 @@ class FoodRecognitionView(APIView):
 
             food_name = concepts[0]["name"]
 
-            # Step 2: Get nutrition data
-            nutrition_data = get_nutritionix_data(food_name)
+            # Step 2: Get nutrition data from Spoonacular
+            nutrition_data = get_spoonacular_data(food_name)
 
             # Step 3: Create FoodItem object
             # We use request.user because permission_classes=[IsAuthenticated]
-            food_item = FoodItem.objects.create(
+            food_item = FoodItem.objects.create(  # pylint: disable=no-member
                 user=request.user,
                 name=nutrition_data['food_name'],
                 calories=nutrition_data['calories'],
@@ -171,9 +202,18 @@ class FoodRecognitionView(APIView):
 
             return Response(response_data, status=status.HTTP_201_CREATED)
 
-        except Exception as e:
-            # It is good practice to log the specific error here for debugging
+        except (KeyError, ValueError) as e:
+            return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except (SpoonacularAPIError, SpoonacularDataError) as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as e:  # pylint: disable=broad-except
+            # It is good practice to log the specific error here for debugging
+            import traceback
+            error_details = traceback.format_exc()
+            return Response({
+                "error": str(e),
+                "details": error_details
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 @extend_schema(
     tags=["Food"],
@@ -193,7 +233,7 @@ class FoodItemByDateView(APIView):
 
     def get(self, request):
         # 1. Start with all items belonging to the current user
-        queryset = FoodItem.objects.filter(user=request.user)
+        queryset = FoodItem.objects.filter(user=request.user)  # pylint: disable=no-member
         
         # 2. Get the date from URL parameters (e.g., ?date=2025-12-08)
         date_param = request.query_params.get('date')
@@ -250,7 +290,7 @@ class FoodItemUpdateView(generics.UpdateAPIView):
 
     def get_queryset(self):
         # Users can only update their own items
-        return FoodItem.objects.filter(user=self.request.user)
+        return FoodItem.objects.filter(user=self.request.user)  # pylint: disable=no-member
     
 
 @extend_schema(
@@ -264,7 +304,7 @@ class FoodItemDeleteView(generics.DestroyAPIView):
 
     def get_queryset(self):
         # Users can only delete their own items
-        return FoodItem.objects.filter(user=self.request.user)
+        return FoodItem.objects.filter(user=self.request.user)  # pylint: disable=no-member
 
 
 @extend_schema(
@@ -280,7 +320,7 @@ class FoodItemDeleteView(generics.DestroyAPIView):
     ]
 )
 class WaterIntakeCreateView(generics.CreateAPIView):
-    queryset = WaterIntake.objects.all()
+    queryset = WaterIntake.objects.all()  # pylint: disable=no-member
     serializer_class = WaterIntakeSerializer
     permission_classes = [IsAuthenticated]
 
@@ -301,7 +341,7 @@ class WaterIntakeDeleteView(generics.DestroyAPIView):
 
     def get_queryset(self):
         # Ensure user can only delete their own records
-        return WaterIntake.objects.filter(user=self.request.user)
+        return WaterIntake.objects.filter(user=self.request.user)  # pylint: disable=no-member
     
 
 @extend_schema(
@@ -333,7 +373,7 @@ class WaterIntakeDailyTotalView(APIView):
 
         # 2. Filter by user and date, then aggregate the sum of the related type's amount
         # We use 'intake_type__amount_ml' to follow the ForeignKey relationship
-        aggregation = WaterIntake.objects.filter(
+        aggregation = WaterIntake.objects.filter(  # pylint: disable=no-member
             user=request.user, 
             date=target_date
         ).aggregate(total_ml=Sum('intake_type__amount_ml'))
