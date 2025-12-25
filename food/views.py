@@ -260,6 +260,7 @@ class FoodRecognitionView(APIView):
             # Prepare response data (combine API data with the new DB ID)
             response_data = nutrition_data.copy()
             response_data['id'] = food_item.id
+            response_data['name'] = food_item.name  # Add 'name' field for consistency with FoodItemSerializer
             response_data['created_at'] = food_item.date
 
             return Response(response_data, status=status.HTTP_201_CREATED)
@@ -339,13 +340,13 @@ class AddRecipeView(APIView):
                 meal_type=meal_type
             )
 
-            # Prepare response data
+            # Prepare response data - EXACT same format as QR code scan process
             response_data = nutrition_data.copy()
             response_data['id'] = food_item.id
+            response_data['name'] = food_item.name
             response_data['created_at'] = food_item.date
-            if meal_type:
-                response_data['meal_type'] = meal_type.id
-                response_data['meal_type_name'] = meal_type.name
+            # Note: Not including meal_type in response to match QR code format
+            # meal_type is saved in DB but not in response, same as QR code process
 
             return Response(response_data, status=status.HTTP_201_CREATED)
 
