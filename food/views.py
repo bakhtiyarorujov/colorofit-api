@@ -6,10 +6,10 @@ from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework import status
 import requests as rq
-from .models import FoodItem, WaterIntake
+from .models import FoodItem, WaterIntake, MealType
 from rest_framework.permissions import IsAuthenticated
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
-    , WaterIntakeSerializer
+    , WaterIntakeSerializer, AddRecipeRequestSerializer
 from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
@@ -132,6 +132,68 @@ def get_spoonacular_data(food_name: str):
     }
 
 
+def get_spoonacular_recipe_by_id(recipe_id: int):
+    """
+    Get nutrition data from Spoonacular API by recipe ID.
+    Uses recipe information endpoint with includeNutrition=true.
+    """
+    url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
+    params = {
+        "includeNutrition": "true",
+        "apiKey": SPOONACULAR_API_KEY
+    }
+
+    try:
+        response = rq.get(url, params=params, timeout=30)
+    except rq.exceptions.RequestException as e:
+        raise SpoonacularAPIError(f"Spoonacular API request failed: {str(e)}") from e
+    
+    if response.status_code != 200:
+        error_text = response.text[:200] if response.text else "No error details"
+        raise SpoonacularAPIError(f"Spoonacular API error: {response.status_code} - {error_text}")
+
+    try:
+        recipe = response.json()
+    except ValueError as e:
+        raise SpoonacularDataError(f"Invalid JSON response from Spoonacular API: {str(e)}") from e
+
+    nutrition = recipe.get("nutrition", {})
+    
+    if not nutrition:
+        raise SpoonacularDataError(f"No nutrition data found for recipe ID: {recipe_id}")
+    
+    nutrients = nutrition.get("nutrients", [])
+
+    if not nutrients:
+        raise SpoonacularDataError(f"No nutrients found in nutrition data for recipe ID: {recipe_id}")
+
+    # Create a dictionary to map nutrient names to their values
+    nutrient_map = {}
+    for nutrient in nutrients:
+        name = nutrient.get("name", "").lower()
+        amount = nutrient.get("amount", 0)
+        nutrient_map[name] = float(amount or 0)
+
+    # Extract nutrition values with fallbacks
+    return {
+        "food_name": recipe.get("title", f"Recipe {recipe_id}"),
+        "calories": nutrient_map.get("calories", 0),
+        "protein": nutrient_map.get("protein", 0),
+        "fat": nutrient_map.get("fat", 0),
+        "saturated_fat": nutrient_map.get("saturated fat", 0),
+        "trans_fat": nutrient_map.get("trans fat", 0),
+        "carbohydrates": nutrient_map.get("carbohydrates", 0),
+        "fiber": nutrient_map.get("fiber", 0),
+        "sugar": nutrient_map.get("sugar", 0),
+        "cholesterol": nutrient_map.get("cholesterol", 0),
+        "sodium": nutrient_map.get("sodium", 0),
+        "calcium": nutrient_map.get("calcium", 0),
+        "iron": nutrient_map.get("iron", 0),
+        "vitaminA": nutrient_map.get("vitamin a", 0),
+        "vitaminC": nutrient_map.get("vitamin c", 0),
+    }
+
+
 @extend_schema(
     request=FoodRecognitionRequestSerializer,
     responses={
@@ -214,6 +276,91 @@ class FoodRecognitionView(APIView):
                 "error": str(e),
                 "details": error_details
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@extend_schema(
+    request=AddRecipeRequestSerializer,
+    responses={
+        201: OpenApiResponse(
+            description="Successfully added recipe to database",
+            examples=[
+                OpenApiExample(
+                    'Success',
+                    value={
+                        "id": 16,
+                        "food_name": "Pasta Carbonara",
+                        "calories": 450,
+                        "protein": 20,
+                        "carbohydrates": 55,
+                        "fat": 15
+                    }
+                )
+            ]
+        ),
+    },
+    tags=["Food"],
+    summary="Add Recipe from Spoonacular",
+    description="Adds a recipe from Spoonacular by recipe ID to the user's food log. Optionally specify meal type."
+)
+class AddRecipeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = AddRecipeRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        recipe_id = serializer.validated_data["recipe_id"]
+        meal_type_id = serializer.validated_data.get("meal_type")
+
+        try:
+            # Step 1: Get nutrition data from Spoonacular by recipe ID
+            nutrition_data = get_spoonacular_recipe_by_id(recipe_id)
+
+            # Step 2: Get meal_type if provided
+            meal_type = None
+            if meal_type_id:
+                try:
+                    meal_type = MealType.objects.get(id=meal_type_id)  # pylint: disable=no-member
+                except MealType.DoesNotExist:  # pylint: disable=no-member
+                    return Response(
+                        {"error": f"Meal type with id {meal_type_id} not found"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            # Step 3: Create FoodItem object
+            food_item = FoodItem.objects.create(  # pylint: disable=no-member
+                user=request.user,
+                name=nutrition_data['food_name'],
+                calories=nutrition_data['calories'],
+                protein=nutrition_data['protein'],
+                carbohydrates=nutrition_data['carbohydrates'],
+                fats=nutrition_data['fat'],
+                meal_type=meal_type
+            )
+
+            # Prepare response data
+            response_data = nutrition_data.copy()
+            response_data['id'] = food_item.id
+            response_data['created_at'] = food_item.date
+            if meal_type:
+                response_data['meal_type'] = meal_type.id
+                response_data['meal_type_name'] = meal_type.name
+
+            return Response(response_data, status=status.HTTP_201_CREATED)
+
+        except (KeyError, ValueError) as e:
+            return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except (SpoonacularAPIError, SpoonacularDataError) as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as e:  # pylint: disable=broad-except
+            import traceback
+            error_details = traceback.format_exc()
+            return Response({
+                "error": str(e),
+                "details": error_details
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 
 @extend_schema(
     tags=["Food"],

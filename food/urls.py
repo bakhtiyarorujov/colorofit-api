@@ -1,9 +1,10 @@
 from django.urls import path
 from .views import FoodRecognitionView, FoodItemByDateView, FoodItemUpdateView, FoodItemDeleteView \
-    , WaterIntakeCreateView, WaterIntakeDeleteView, WaterIntakeDailyTotalView
+    , WaterIntakeCreateView, WaterIntakeDeleteView, WaterIntakeDailyTotalView, AddRecipeView
 
 urlpatterns = [
     path("predict-food/", FoodRecognitionView.as_view(), name="predict-food"),
+    path("add-recipe/", AddRecipeView.as_view(), name="add-recipe"),
     path("history/", FoodItemByDateView.as_view(), name="food-history"),
     path("update/<int:pk>/", FoodItemUpdateView.as_view(), name="update-food"),
     path("items/<int:pk>/delete/", FoodItemDeleteView.as_view(), name="food-item-delete"),
