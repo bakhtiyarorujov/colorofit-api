@@ -313,6 +313,7 @@ class AddRecipeView(APIView):
 
         recipe_id = serializer.validated_data["recipe_id"]
         meal_type_id = serializer.validated_data.get("meal_type")
+        meal_type_name = serializer.validated_data.get("meal_type_name")
 
         try:
             # Step 1: Get nutrition data from Spoonacular by recipe ID
@@ -320,14 +321,33 @@ class AddRecipeView(APIView):
 
             # Step 2: Get meal_type if provided
             meal_type = None
-            if meal_type_id:
+            
+            # First try to find by name (preferred method)
+            if meal_type_name:
+                meal_type_name_lower = meal_type_name.lower().strip()
+                # Map frontend names to backend names
+                meal_type_mapping = {
+                    'breakfast': 'Breakfast',
+                    'lunch': 'Lunch',
+                    'snacks': 'Snacks',
+                    'snack': 'Snacks',
+                    'dinner': 'Dinner',
+                }
+                backend_meal_type_name = meal_type_mapping.get(meal_type_name_lower, meal_type_name)
+                
+                try:
+                    meal_type = MealType.objects.get(name__iexact=backend_meal_type_name)  # pylint: disable=no-member
+                except MealType.DoesNotExist:  # pylint: disable=no-member
+                    # Meal type not found by name, will remain None (backend will default to snacks)
+                    pass
+            
+            # If not found by name, try by ID (fallback)
+            if meal_type is None and meal_type_id:
                 try:
                     meal_type = MealType.objects.get(id=meal_type_id)  # pylint: disable=no-member
                 except MealType.DoesNotExist:  # pylint: disable=no-member
-                    return Response(
-                        {"error": f"Meal type with id {meal_type_id} not found"},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
+                    # Meal type not found by ID, will remain None (backend will default to snacks)
+                    pass
 
             # Step 3: Create FoodItem object
             food_item = FoodItem.objects.create(  # pylint: disable=no-member

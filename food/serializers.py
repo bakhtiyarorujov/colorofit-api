@@ -9,6 +9,7 @@ class FoodRecognitionRequestSerializer(serializers.Serializer):
 class AddRecipeRequestSerializer(serializers.Serializer):
     recipe_id = serializers.IntegerField(required=True)
     meal_type = serializers.IntegerField(required=False, allow_null=True)
+    meal_type_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class FoodItemSerializer(serializers.ModelSerializer):
