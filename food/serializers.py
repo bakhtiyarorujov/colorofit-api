@@ -4,6 +4,8 @@ from .models import FoodItem, WaterIntake
 
 class FoodRecognitionRequestSerializer(serializers.Serializer):
     image = serializers.ImageField(required=True)
+    meal_type = serializers.IntegerField(required=False, allow_null=True)
+    meal_type_name = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 
 class AddRecipeRequestSerializer(serializers.Serializer):

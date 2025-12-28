@@ -1,5 +1,6 @@
 import base64
-from datetime import date
+import logging
+from datetime import date, datetime, timedelta
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
 from rest_framework.views import APIView
 from rest_framework import generics
@@ -13,19 +14,186 @@ from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, F
 from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
+logger = logging.getLogger(__name__)
+
+# Constants
 CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
 CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
 SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
-# Create your views here.
+
+# Meal type mapping
+MEAL_TYPE_MAPPING = {
+    'breakfast': 'Breakfast',
+    'lunch': 'Lunch',
+    'snacks': 'Snacks',
+    'snack': 'Snacks',
+    'dinner': 'Dinner',
+}
+
+MEAL_TYPE_GROUPING_MAP = {
+    'breakfast': 'breakfast',
+    'lunch': 'lunch',
+    'snacks': 'snacks',
+    'snack': 'snacks',
+    'dinner': 'dinner',
+}
+
+# Date formats
+DATE_FORMATS = [
+    '%Y-%m-%d',      # 2026-12-02
+    '%m/%d/%Y',      # 12/2/2026 or 12/02/2026
+    '%d/%m/%Y',      # 2/12/2026 or 02/12/2026
+    '%Y/%m/%d',      # 2026/12/02
+]
 
 User = get_user_model()
 
 
+# Helper Functions
+def parse_date(date_string: str) -> date:
+    """
+    Parse date string in multiple formats.
+    
+    Args:
+        date_string: Date string in various formats
+        
+    Returns:
+        date object
+        
+    Raises:
+        ValueError: If date cannot be parsed
+    """
+    for date_format in DATE_FORMATS:
+        try:
+            return datetime.strptime(date_string, date_format).date()
+        except ValueError:
+            continue
+    
+    raise ValueError(f"Unable to parse date: {date_string}")
 
+
+def resolve_meal_type(meal_type_id=None, meal_type_name=None):
+    """
+    Resolve meal type by ID or name.
+    
+    Args:
+        meal_type_id: Optional meal type ID
+        meal_type_name: Optional meal type name
+        
+    Returns:
+        MealType instance or None
+    """
+    meal_type = None
+    
+    # First try to find by name (preferred method)
+    if meal_type_name:
+        meal_type_name_lower = meal_type_name.lower().strip()
+        backend_meal_type_name = MEAL_TYPE_MAPPING.get(meal_type_name_lower, meal_type_name)
+        
+        try:
+            meal_type = MealType.objects.get(name__iexact=backend_meal_type_name)  # pylint: disable=no-member
+        except MealType.DoesNotExist:  # pylint: disable=no-member
+            logger.warning("Meal type not found by name: %s", backend_meal_type_name)
+    
+    # If not found by name, try by ID (fallback)
+    if meal_type is None and meal_type_id:
+        try:
+            meal_type = MealType.objects.get(id=meal_type_id)  # pylint: disable=no-member
+        except MealType.DoesNotExist:  # pylint: disable=no-member
+            logger.warning("Meal type not found by ID: %s", meal_type_id)
+    
+    return meal_type
+
+
+def group_food_items_by_meal_type(food_items_data):
+    """
+    Group food items by meal type.
+    
+    Args:
+        food_items_data: List of serialized food item data
+        
+    Returns:
+        Dictionary with meal type keys and food item lists
+    """
+    grouped_data = {
+        'breakfast': [],
+        'lunch': [],
+        'snacks': [],
+        'dinner': []
+    }
+    
+    for item_data in food_items_data:
+        meal_type_name = item_data.get('meal_type_name', '').strip() if item_data.get('meal_type_name') else None
+        
+        if meal_type_name:
+            meal_type_name_lower = meal_type_name.lower()
+            # Try exact match first
+            matched_key = MEAL_TYPE_GROUPING_MAP.get(meal_type_name_lower)
+            if matched_key:
+                grouped_data[matched_key].append(item_data)
+            elif 'breakfast' in meal_type_name_lower:
+                grouped_data['breakfast'].append(item_data)
+            elif 'lunch' in meal_type_name_lower:
+                grouped_data['lunch'].append(item_data)
+            elif 'snack' in meal_type_name_lower:
+                grouped_data['snacks'].append(item_data)
+            elif 'dinner' in meal_type_name_lower:
+                grouped_data['dinner'].append(item_data)
+            else:
+                grouped_data['snacks'].append(item_data)
+        else:
+            grouped_data['snacks'].append(item_data)
+    
+    return grouped_data
+
+
+def extract_nutrition_data(nutrients):
+    """
+    Extract nutrition data from nutrients list.
+    
+    Args:
+        nutrients: List of nutrient dictionaries from API
+        
+    Returns:
+        Dictionary mapping nutrient names to values
+    """
+    nutrient_map = {}
+    for nutrient in nutrients:
+        name = nutrient.get("name", "").lower()
+        amount = nutrient.get("amount", 0)
+        nutrient_map[name] = float(amount or 0)
+    
+    return {
+        "calories": nutrient_map.get("calories", 0),
+        "protein": nutrient_map.get("protein", 0),
+        "fat": nutrient_map.get("fat", 0),
+        "saturated_fat": nutrient_map.get("saturated fat", 0),
+        "trans_fat": nutrient_map.get("trans fat", 0),
+        "carbohydrates": nutrient_map.get("carbohydrates", 0),
+        "fiber": nutrient_map.get("fiber", 0),
+        "sugar": nutrient_map.get("sugar", 0),
+        "cholesterol": nutrient_map.get("cholesterol", 0),
+        "sodium": nutrient_map.get("sodium", 0),
+        "calcium": nutrient_map.get("calcium", 0),
+        "iron": nutrient_map.get("iron", 0),
+        "vitaminA": nutrient_map.get("vitamin a", 0),
+        "vitaminC": nutrient_map.get("vitamin c", 0),
+    }
 
 
 def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "food-item-v1-recognition", app_id: str = "main"):
-
+    """
+    Predict food item from base64 encoded image using Clarifai API.
+    
+    Args:
+        base64_image: Base64 encoded image string
+        pat: Personal Access Token for Clarifai
+        model_id: Model ID to use
+        app_id: App ID
+        
+    Returns:
+        Prediction response JSON
+    """
     url = f"https://api.clarifai.com/v2/models/{model_id}/outputs"
 
     headers = {
@@ -35,7 +203,7 @@ def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "foo
 
     data = {
         "user_app_id": {
-            "user_id": "clarifai",  # or your actual user ID
+            "user_id": "clarifai",
             "app_id": app_id
         },
         "inputs": [
@@ -66,6 +234,16 @@ def get_spoonacular_data(food_name: str):
     """
     Get nutrition data from Spoonacular API for a given food name.
     Uses complexSearch endpoint with addRecipeNutrition=true to get nutrition info.
+    
+    Args:
+        food_name: Name of the food to search for
+        
+    Returns:
+        Dictionary with nutrition data
+        
+    Raises:
+        SpoonacularAPIError: If API request fails
+        SpoonacularDataError: If data parsing fails
     """
     url = "https://api.spoonacular.com/recipes/complexSearch"
     params = {
@@ -105,37 +283,27 @@ def get_spoonacular_data(food_name: str):
     if not nutrients:
         raise SpoonacularDataError(f"No nutrients found in nutrition data for food: {food_name}")
 
-    # Create a dictionary to map nutrient names to their values
-    nutrient_map = {}
-    for nutrient in nutrients:
-        name = nutrient.get("name", "").lower()
-        amount = nutrient.get("amount", 0)
-        nutrient_map[name] = float(amount or 0)
-
-    # Extract nutrition values with fallbacks
-    return {
-        "food_name": recipe.get("title", food_name),
-        "calories": nutrient_map.get("calories", 0),
-        "protein": nutrient_map.get("protein", 0),
-        "fat": nutrient_map.get("fat", 0),
-        "saturated_fat": nutrient_map.get("saturated fat", 0),
-        "trans_fat": nutrient_map.get("trans fat", 0),
-        "carbohydrates": nutrient_map.get("carbohydrates", 0),
-        "fiber": nutrient_map.get("fiber", 0),
-        "sugar": nutrient_map.get("sugar", 0),
-        "cholesterol": nutrient_map.get("cholesterol", 0),
-        "sodium": nutrient_map.get("sodium", 0),
-        "calcium": nutrient_map.get("calcium", 0),
-        "iron": nutrient_map.get("iron", 0),
-        "vitaminA": nutrient_map.get("vitamin a", 0),
-        "vitaminC": nutrient_map.get("vitamin c", 0),
-    }
+    # Extract nutrition values using helper function
+    nutrition_data = extract_nutrition_data(nutrients)
+    nutrition_data["food_name"] = recipe.get("title", food_name)
+    
+    return nutrition_data
 
 
 def get_spoonacular_recipe_by_id(recipe_id: int):
     """
     Get nutrition data from Spoonacular API by recipe ID.
     Uses recipe information endpoint with includeNutrition=true.
+    
+    Args:
+        recipe_id: Spoonacular recipe ID
+        
+    Returns:
+        Dictionary with nutrition data
+        
+    Raises:
+        SpoonacularAPIError: If API request fails
+        SpoonacularDataError: If data parsing fails
     """
     url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
     params = {
@@ -167,31 +335,11 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
     if not nutrients:
         raise SpoonacularDataError(f"No nutrients found in nutrition data for recipe ID: {recipe_id}")
 
-    # Create a dictionary to map nutrient names to their values
-    nutrient_map = {}
-    for nutrient in nutrients:
-        name = nutrient.get("name", "").lower()
-        amount = nutrient.get("amount", 0)
-        nutrient_map[name] = float(amount or 0)
-
-    # Extract nutrition values with fallbacks
-    return {
-        "food_name": recipe.get("title", f"Recipe {recipe_id}"),
-        "calories": nutrient_map.get("calories", 0),
-        "protein": nutrient_map.get("protein", 0),
-        "fat": nutrient_map.get("fat", 0),
-        "saturated_fat": nutrient_map.get("saturated fat", 0),
-        "trans_fat": nutrient_map.get("trans fat", 0),
-        "carbohydrates": nutrient_map.get("carbohydrates", 0),
-        "fiber": nutrient_map.get("fiber", 0),
-        "sugar": nutrient_map.get("sugar", 0),
-        "cholesterol": nutrient_map.get("cholesterol", 0),
-        "sodium": nutrient_map.get("sodium", 0),
-        "calcium": nutrient_map.get("calcium", 0),
-        "iron": nutrient_map.get("iron", 0),
-        "vitaminA": nutrient_map.get("vitamin a", 0),
-        "vitaminC": nutrient_map.get("vitamin c", 0),
-    }
+    # Extract nutrition values using helper function
+    nutrition_data = extract_nutrition_data(nutrients)
+    nutrition_data["food_name"] = recipe.get("title", f"Recipe {recipe_id}")
+    
+    return nutrition_data
 
 
 @extend_schema(
@@ -245,7 +393,12 @@ class FoodRecognitionView(APIView):
             # Step 2: Get nutrition data from Spoonacular
             nutrition_data = get_spoonacular_data(food_name)
 
-            # Step 3: Create FoodItem object
+            # Step 3: Get meal_type if provided
+            meal_type_id = serializer.validated_data.get("meal_type")
+            meal_type_name = serializer.validated_data.get("meal_type_name")
+            meal_type = resolve_meal_type(meal_type_id, meal_type_name)
+
+            # Step 4: Create FoodItem object
             # We use request.user because permission_classes=[IsAuthenticated]
             food_item = FoodItem.objects.create(  # pylint: disable=no-member
                 user=request.user,
@@ -254,7 +407,7 @@ class FoodRecognitionView(APIView):
                 protein=nutrition_data['protein'],
                 carbohydrates=nutrition_data['carbohydrates'],
                 fats=nutrition_data['fat'], # Note: Model field is 'fats', helper key is 'fat'
-                # meal_type is left null as it wasn't provided in the request
+                meal_type=meal_type  # Can be None if not provided
             )
 
             # Prepare response data (combine API data with the new DB ID)
@@ -320,34 +473,7 @@ class AddRecipeView(APIView):
             nutrition_data = get_spoonacular_recipe_by_id(recipe_id)
 
             # Step 2: Get meal_type if provided
-            meal_type = None
-            
-            # First try to find by name (preferred method)
-            if meal_type_name:
-                meal_type_name_lower = meal_type_name.lower().strip()
-                # Map frontend names to backend names
-                meal_type_mapping = {
-                    'breakfast': 'Breakfast',
-                    'lunch': 'Lunch',
-                    'snacks': 'Snacks',
-                    'snack': 'Snacks',
-                    'dinner': 'Dinner',
-                }
-                backend_meal_type_name = meal_type_mapping.get(meal_type_name_lower, meal_type_name)
-                
-                try:
-                    meal_type = MealType.objects.get(name__iexact=backend_meal_type_name)  # pylint: disable=no-member
-                except MealType.DoesNotExist:  # pylint: disable=no-member
-                    # Meal type not found by name, will remain None (backend will default to snacks)
-                    pass
-            
-            # If not found by name, try by ID (fallback)
-            if meal_type is None and meal_type_id:
-                try:
-                    meal_type = MealType.objects.get(id=meal_type_id)  # pylint: disable=no-member
-                except MealType.DoesNotExist:  # pylint: disable=no-member
-                    # Meal type not found by ID, will remain None (backend will default to snacks)
-                    pass
+            meal_type = resolve_meal_type(meal_type_id, meal_type_name)
 
             # Step 3: Create FoodItem object
             food_item = FoodItem.objects.create(  # pylint: disable=no-member
@@ -407,18 +533,17 @@ class FoodItemByDateView(APIView):
         date_param = request.query_params.get('date')
 
         # 3. Apply the filter - if date provided use it, otherwise use today
-        from datetime import datetime, timedelta
         if date_param:
-            # Parse the date string and filter by date (ignoring time)
             try:
-                target_date = datetime.strptime(date_param, '%Y-%m-%d').date()
+                target_date = parse_date(date_param)
                 # Filter by date range (start of day to end of day)
                 start_datetime = datetime.combine(target_date, datetime.min.time())
                 end_datetime = start_datetime + timedelta(days=1)
                 queryset = queryset.filter(date__gte=start_datetime, date__lt=end_datetime)
             except ValueError:
-                # If date format is invalid, return empty result
+                # If date format is invalid, return error response
                 return Response({
+                    'error': f'Invalid date format: {date_param}. Supported formats: YYYY-MM-DD, M/D/YYYY, D/M/YYYY',
                     'breakfast': [],
                     'lunch': [],
                     'snacks': [],
@@ -433,36 +558,9 @@ class FoodItemByDateView(APIView):
             
         queryset = queryset.order_by('-date').select_related('meal_type')
         
-        # 4. Group food items by meal type
-        grouped_data = {
-            'breakfast': [],
-            'lunch': [],
-            'snacks': [],
-            'dinner': []
-        }
-        
-        # Serialize each food item and group by meal type
+        # 4. Serialize and group food items by meal type
         serializer = FoodItemSerializer(queryset, many=True)
-        
-        for item_data in serializer.data:
-            meal_type_name = item_data.get('meal_type_name', '').lower() if item_data.get('meal_type_name') else None
-            
-            # Normalize meal type name to match our keys
-            if meal_type_name:
-                if 'breakfast' in meal_type_name:
-                    grouped_data['breakfast'].append(item_data)
-                elif 'lunch' in meal_type_name:
-                    grouped_data['lunch'].append(item_data)
-                elif 'snack' in meal_type_name:
-                    grouped_data['snacks'].append(item_data)
-                elif 'dinner' in meal_type_name:
-                    grouped_data['dinner'].append(item_data)
-                else:
-                    # If meal type doesn't match, add to snacks as default
-                    grouped_data['snacks'].append(item_data)
-            else:
-                # If no meal type, add to snacks as default
-                grouped_data['snacks'].append(item_data)
+        grouped_data = group_food_items_by_meal_type(serializer.data)
         
         return Response(grouped_data, status=status.HTTP_200_OK)
     
@@ -557,10 +655,18 @@ class WaterIntakeDailyTotalView(APIView):
     def get(self, request):
         # 1. Get the date from params, or default to today
         date_param = request.query_params.get('date')
-        target_date = date_param if date_param else date.today()
+        
+        if date_param:
+            try:
+                target_date = parse_date(date_param)
+            except ValueError:
+                return Response({
+                    'error': f'Invalid date format: {date_param}. Supported formats: YYYY-MM-DD, M/D/YYYY, D/M/YYYY'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            target_date = date.today()
 
         # 2. Filter by user and date, then aggregate the sum of the related type's amount
-        # We use 'intake_type__amount_ml' to follow the ForeignKey relationship
         aggregation = WaterIntake.objects.filter(  # pylint: disable=no-member
             user=request.user, 
             date=target_date
@@ -574,6 +680,6 @@ class WaterIntakeDailyTotalView(APIView):
 
         # 5. Return formatted response (2 decimal places)
         return Response({
-            "date": target_date,
+            "date": str(target_date),
             "total_liters": f"{total_liters:.2f}"
         })
