@@ -176,8 +176,13 @@ def extract_nutrition_data(nutrients):
         "sodium": nutrient_map.get("sodium", 0),
         "calcium": nutrient_map.get("calcium", 0),
         "iron": nutrient_map.get("iron", 0),
+        "potassium": nutrient_map.get("potassium", 0),
+        "zinc": nutrient_map.get("zinc", 0),
         "vitaminA": nutrient_map.get("vitamin a", 0),
         "vitaminC": nutrient_map.get("vitamin c", 0),
+        "vitaminD": nutrient_map.get("vitamin d", 0),
+        "vitaminE": nutrient_map.get("vitamin e", 0),
+        "vitaminK": nutrient_map.get("vitamin k", 0),
     }
 
 
@@ -483,7 +488,19 @@ class AddRecipeView(APIView):
                 protein=nutrition_data['protein'],
                 carbohydrates=nutrition_data['carbohydrates'],
                 fats=nutrition_data['fat'],
-                meal_type=meal_type
+                meal_type=meal_type,
+                trans_fat=nutrition_data['trans_fat'],
+                saturated_fat=nutrition_data['saturated_fat'],
+                vitamin_a=nutrition_data['vitaminA'],
+                vitamin_c=nutrition_data['vitaminC'],
+                vitamin_d=nutrition_data['vitaminD'],
+                vitamin_e=nutrition_data['vitaminE'],
+                vitamin_k=nutrition_data['vitaminK'],
+                mineral_calcium=nutrition_data['calcium'],
+                mineral_iron=nutrition_data['iron'],
+                mineral_sodium=nutrition_data['sodium'],
+                mineral_potassium=nutrition_data['potassium'],
+                mineral_zink=nutrition_data['zinc'],
             )
 
             # Prepare response data - EXACT same format as QR code scan process

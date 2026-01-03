@@ -18,7 +18,19 @@ class FoodItem(models.Model):
     fats = models.DecimalField(max_digits=6, decimal_places=2)
     meal_type = models.ForeignKey(MealType, on_delete=models.CASCADE, related_name='food_items', null=True, blank=True)
     date = models.DateTimeField(auto_now_add=True)
-
+    trans_fat = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    saturated_fat = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    vitamin_a = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    vitamin_c = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    vitamin_d = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    vitamin_e = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    vitamin_k = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    mineral_calcium = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    mineral_iron = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    mineral_sodium = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    mineral_potassium = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    mineral_zink = models.DecimalField(max_digits=6, decimal_places=2, default=0.0)
+    
     def __str__(self):
         return self.name
 
