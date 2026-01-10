@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import FoodItem, WaterIntake
+from .models import FoodItem, WaterIntake, WaterIntakeType
 
 
 class FoodRecognitionRequestSerializer(serializers.Serializer):
@@ -65,3 +65,19 @@ class FoodStatsResponseSerializer(serializers.Serializer):
     overall = NutrientGroupSerializer()
     vitamins = VitaminGroupSerializer()
     minerals = MineralGroupSerializer()
+
+
+class WaterIntakeTypeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WaterIntakeType
+        fields = ['id', 'name', 'amount_ml']
+
+
+class WaterIntakePreferenceSerializer(serializers.Serializer):
+    water_intake_type_id = serializers.PrimaryKeyRelatedField(
+        queryset=WaterIntakeType.objects.all(),
+        source='water_intake_type_preference'
+    )
+
+    class Meta:
+        fields = ['water_intake_type_id']

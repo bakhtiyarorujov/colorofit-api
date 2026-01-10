@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
-
+from users.models import WaterIntakeType
 User = get_user_model()
 # Create your models here.
 class MealType(models.Model):
@@ -34,12 +34,6 @@ class FoodItem(models.Model):
     def __str__(self):
         return self.name
 
-class WaterIntakeType(models.Model):
-    name = models.CharField(max_length=100)
-    amount_ml = models.PositiveIntegerField()
-
-    def __str__(self):
-        return f"{self.amount_ml} ml"
     
 class WaterIntake(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='water_intakes')

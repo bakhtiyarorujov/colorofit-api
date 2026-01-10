@@ -2,6 +2,7 @@ import base64
 import logging
 from django.utils.dateparse import parse_date
 from datetime import date, datetime, timedelta
+from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 from django.db.models import Sum
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
@@ -10,10 +11,10 @@ from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework import status
 import requests as rq
-from .models import FoodItem, WaterIntake, MealType
+from .models import FoodItem, WaterIntake, MealType, WaterIntakeType
 from rest_framework.permissions import IsAuthenticated
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
-    , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer
+    , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer, WaterIntakePreferenceSerializer
 from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
@@ -616,23 +617,29 @@ class FoodItemDeleteView(generics.DestroyAPIView):
 @extend_schema(
     tags=["Water Intake"],
     summary="Log water intake",
-    description="Creates a new water intake record for the current user (defaults to today's date).",
-    examples=[
-        OpenApiExample(
-            'Example Request',
-            value={"intake_type": 1}, # 1 is the ID of a WaterIntakeType (e.g. 200ml)
-            request_only=True
-        )
-    ]
+    description="Creates a new water intake record for the current user (defaults to today's date)."
 )
 class WaterIntakeCreateView(generics.CreateAPIView):
-    queryset = WaterIntake.objects.all()  # pylint: disable=no-member
+    queryset = WaterIntake.objects.all()
     serializer_class = WaterIntakeSerializer
     permission_classes = [IsAuthenticated]
 
     def perform_create(self, serializer):
-        # Automatically assign the currently logged-in user
-        serializer.save(user=self.request.user)
+        user = self.request.user
+        # 1. Check if intake_type was provided in the request body
+        intake_type = serializer.validated_data.get('intake_type')
+
+        # 2. If not provided, try to use the user's preference
+        if not intake_type:
+            intake_type = user.water_intake_type_preference
+            
+        # 3. If still no intake_type, raise an error
+        if not intake_type:
+            raise ValidationError(
+                {"intake_type": "No intake type provided and no user preference set."}
+            )
+
+        serializer.save(user=user, intake_type=intake_type)
 
 
 @extend_schema(
@@ -956,3 +963,56 @@ class RangeFoodStatsView(APIView):
         }
         serializer = FoodStatsResponseSerializer(data)
         return Response(serializer.data)
+
+
+@extend_schema(
+    methods=['GET'],
+    tags=["Water Intake"],
+    summary="List water intake types",
+    description="Retrieve a list of all available water intake types (e.g., 200ml, 500ml)."
+)
+class WaterIntakeTypeListView(generics.ListAPIView):
+    """
+    View to list all available water intake types (e.g., 200ml, 500ml).
+    """
+    queryset = WaterIntakeType.objects.all()  # pylint: disable=no-member
+    serializer_class = WaterIntakeSerializer
+    permission_classes = [IsAuthenticated]
+
+
+@extend_schema(
+    methods=['PATCH'],
+    tags=["Water Intake"],
+    summary="Set water intake type preference",
+    description="Updates the logged-in user's preferred water intake container/type.",
+    request=WaterIntakePreferenceSerializer,
+    responses={
+        200: OpenApiExample(
+            'Success',
+            value={"message": "Water intake preference updated successfully.", "type_id": 1}
+        ),
+        400: OpenApiExample(
+            'Error',
+            value={"water_intake_type_id": ["Invalid pk \"999\" - object does not exist."]}
+        )
+    }
+)
+class SetWaterIntakePreferenceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        # Initialize serializer with request data and current user instance
+        serializer = WaterIntakePreferenceSerializer(data=request.data)
+        
+        if serializer.is_valid():
+            # Update the user field
+            user = request.user
+            user.water_intake_type_preference = serializer.validated_data['water_intake_type_preference']
+            user.save()
+            
+            return Response({
+                "message": "Water intake preference updated successfully.",
+                "type_id": user.water_intake_type_preference.id
+            }, status=status.HTTP_200_OK)
+            
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
