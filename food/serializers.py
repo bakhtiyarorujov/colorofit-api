@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import FoodItem, WaterIntake, WaterIntakeType
+from .models import FoodItem, WaterIntake, WaterIntakeType, MealType
 
 
 class FoodRecognitionRequestSerializer(serializers.Serializer):
@@ -81,3 +81,9 @@ class WaterIntakePreferenceSerializer(serializers.Serializer):
 
     class Meta:
         fields = ['water_intake_type_id']
+
+
+class MealTypeListSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MealType
+        fields = ['id', 'name']

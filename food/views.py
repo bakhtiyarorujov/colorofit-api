@@ -14,7 +14,8 @@ import requests as rq
 from .models import FoodItem, WaterIntake, MealType, WaterIntakeType
 from rest_framework.permissions import IsAuthenticated
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
-    , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer, WaterIntakePreferenceSerializer
+    , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer, WaterIntakePreferenceSerializer \
+    , MealTypeListSerializer
 from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
@@ -1016,3 +1017,12 @@ class SetWaterIntakePreferenceView(APIView):
             }, status=status.HTTP_200_OK)
             
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+
+class MealTypeListView(generics.ListAPIView):
+    """
+    View to list all meal types (e.g., Breakfast, Lunch, Dinner, Snacks).
+    """
+    queryset = MealType.objects.all()  # pylint: disable=no-member
+    serializer_class = MealTypeListSerializer
+    permission_classes = [IsAuthenticated]
