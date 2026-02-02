@@ -1,5 +1,19 @@
+import decimal
 from rest_framework import serializers
 from .models import FoodItem, WaterIntake, WaterIntakeType, MealType
+
+
+def safe_decimal_to_string(value):
+    """Convert Decimal to string for JSON; avoid InvalidOperation/NaN."""
+    if value is None:
+        return None
+    try:
+        d = decimal.Decimal(value)
+        if d.is_nan() or d.is_infinite():
+            return "0.00"
+        return str(d)
+    except (decimal.InvalidOperation, TypeError, ValueError):
+        return "0.00"
 
 
 class FoodRecognitionRequestSerializer(serializers.Serializer):
@@ -16,10 +30,26 @@ class AddRecipeRequestSerializer(serializers.Serializer):
 
 class FoodItemSerializer(serializers.ModelSerializer):
     meal_type_name = serializers.CharField(source='meal_type.name', read_only=True, allow_null=True)
-    
+    calories = serializers.SerializerMethodField()
+    protein = serializers.SerializerMethodField()
+    carbohydrates = serializers.SerializerMethodField()
+    fats = serializers.SerializerMethodField()
+
     class Meta:
         model = FoodItem
         fields = ['id', 'name', 'calories', 'protein', 'carbohydrates', 'fats', 'meal_type', 'meal_type_name', 'date']
+
+    def get_calories(self, obj):
+        return safe_decimal_to_string(getattr(obj, 'calories', None))
+
+    def get_protein(self, obj):
+        return safe_decimal_to_string(getattr(obj, 'protein', None))
+
+    def get_carbohydrates(self, obj):
+        return safe_decimal_to_string(getattr(obj, 'carbohydrates', None))
+
+    def get_fats(self, obj):
+        return safe_decimal_to_string(getattr(obj, 'fats', None))
 
 
 class FoodItemUpdateSerializer(serializers.ModelSerializer):
