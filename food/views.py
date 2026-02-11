@@ -642,76 +642,6 @@ class WaterIntakeCreateView(generics.CreateAPIView):
 
         serializer.save(user=user, intake_type=intake_type)
 
-
-@extend_schema(
-    tags=["Water Intake"],
-    summary="Delete water intake log",
-    description="Deletes a specific water intake record."
-)
-class WaterIntakeDeleteView(generics.DestroyAPIView):
-    serializer_class = WaterIntakeSerializer
-    permission_classes = [IsAuthenticated]
-    lookup_field = 'pk'
-
-    def get_queryset(self):
-        # Ensure user can only delete their own records
-        return WaterIntake.objects.filter(user=self.request.user)  # pylint: disable=no-member
-    
-
-@extend_schema(
-    tags=["Water Intake"],
-    summary="Get total water intake in Liters",
-    description="Returns the total water consumed on a specific date in Liters (formatted to 2 decimal places).",
-    parameters=[
-        OpenApiParameter(
-            name='date',
-            description='Filter by date (Format: YYYY-MM-DD). Defaults to today if not provided.',
-            required=False,
-            type=str
-        ),
-    ],
-    responses={
-        200: OpenApiExample(
-            'Success',
-            value={"date": "2025-12-09", "total_liters": "2.50"}
-        )
-    }
-)
-class WaterIntakeDailyTotalView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        # 1. Get the date from params, or default to today
-        date_param = request.query_params.get('date')
-        
-        if date_param:
-            try:
-                target_date = parse_date(date_param)
-            except ValueError:
-                return Response({
-                    'error': f'Invalid date format: {date_param}. Supported formats: YYYY-MM-DD, M/D/YYYY, D/M/YYYY'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        else:
-            target_date = date.today()
-
-        # 2. Filter by user and date, then aggregate the sum of the related type's amount
-        aggregation = WaterIntake.objects.filter(  # pylint: disable=no-member
-            user=request.user, 
-            date=target_date
-        ).aggregate(total_ml=Sum('intake_type__amount_ml'))
-
-        # 3. Handle the result (result is None if no records exist)
-        total_ml = aggregation['total_ml'] or 0
-        
-        # 4. Convert to Liters
-        total_liters = total_ml / 1000
-
-        # 5. Return formatted response (2 decimal places)
-        return Response({
-            "date": str(target_date),
-            "total_liters": f"{total_liters:.2f}"
-        })
-
 @extend_schema(
     methods=['GET'], # Ensures this schema only applies to the GET method
     tags=["Food Statistics"],
@@ -754,15 +684,28 @@ class WaterIntakeDailyTotalView(APIView):
     }
 )
 class DailyStatsView(APIView):
+    # Səhv burada idi: Permission class əlavə olundu
+    permission_classes = [IsAuthenticated]
+
     def get(self, request):
-        # Filter for today's food items for the logged-in user
-        today = timezone.now().date()
+        # Parametr kimi gələn tarixi götürürük, yoxdursa bugünkü tarixi götürürük
+        date_param = request.query_params.get('date')
+        
+        if date_param:
+            try:
+                target_date = parse_date(date_param)
+            except ValueError:
+                return Response({'error': 'Invalid date format'}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            target_date = timezone.now().date()
+
+        # Filtrləməni request.user və hədəf tarixinə görə edirik
         queryset = FoodItem.objects.filter(
             user=request.user, 
-            date__date=today
+            date__date=target_date
         )
 
-        # Aggregate all fields in one query
+        # Aqreqasiya (hesablama) hissəsi
         stats = queryset.aggregate(
             total_calories=Sum('calories'),
             total_protein=Sum('protein'),
@@ -780,8 +723,6 @@ class DailyStatsView(APIView):
             total_zink=Sum('mineral_zink'),
         )
 
-        # Format the response to match your JSON structure
-        # Use 'or 0' to handle cases where no items are logged yet (returning 0 instead of null)
         data = {
             "overall": {
                 "calories": stats['total_calories'] or 0,
@@ -806,7 +747,6 @@ class DailyStatsView(APIView):
         }
 
         return Response(data)
-
 
 @extend_schema(
     methods=['GET'],
