@@ -29,197 +29,128 @@ SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
 
 # Meal type mapping
 MEAL_TYPE_MAPPING = {
-    'breakfast': 'Breakfast',
-    'lunch': 'Lunch',
-    'snacks': 'Snacks',
-    'snack': 'Snacks',
-    'dinner': 'Dinner',
+    'breakfast': 'Breakfast', 'lunch': 'Lunch', 'snacks': 'Snacks',
+    'snack': 'Snacks', 'dinner': 'Dinner',
 }
 
 MEAL_TYPE_GROUPING_MAP = {
-    'breakfast': 'breakfast',
-    'lunch': 'lunch',
-    'snacks': 'snacks',
-    'snack': 'snacks',
-    'dinner': 'dinner',
+    'breakfast': 'breakfast', 'lunch': 'lunch', 'snacks': 'snacks',
+    'snack': 'snacks', 'dinner': 'dinner',
 }
 
-# Date formats
-DATE_FORMATS = [
-    '%Y-%m-%d',      # 2026-12-02
-    '%m/%d/%Y',      # 12/2/2026
-    '%d/%m/%Y',      # 2/12/2026
-    '%Y/%m/%d',      # 2026/12/02
-]
+DATE_FORMATS = ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d']
 
 User = get_user_model()
 
-# --- Helper Functions ---
-
+# --- Helpers ---
 def parse_date_custom(date_string: str) -> date:
-    for date_format in DATE_FORMATS:
-        try:
-            return datetime.strptime(date_string, date_format).date()
-        except ValueError:
-            continue
-    raise ValueError(f"Unable to parse date: {date_string}")
+    for f in DATE_FORMATS:
+        try: return datetime.strptime(date_string, f).date()
+        except ValueError: continue
+    raise ValueError(f"Invalid date: {date_string}")
 
-def resolve_meal_type(meal_type_id=None, meal_type_name=None):
-    meal_type = None
-    if meal_type_name:
-        meal_type_name_lower = meal_type_name.lower().strip()
-        backend_meal_type_name = MEAL_TYPE_MAPPING.get(meal_type_name_lower, meal_type_name)
-        try:
-            meal_type = MealType.objects.get(name__iexact=backend_meal_type_name)
-        except MealType.DoesNotExist:
-            logger.warning("Meal type not found by name: %s", backend_meal_type_name)
-    if meal_type is None and meal_type_id:
-        try:
-            meal_type = MealType.objects.get(id=meal_type_id)
-        except MealType.DoesNotExist:
-            logger.warning("Meal type not found by ID: %s", meal_type_id)
-    return meal_type
+def resolve_meal_type(id=None, name=None):
+    mt = None
+    if name:
+        n = MEAL_TYPE_MAPPING.get(name.lower().strip(), name)
+        try: mt = MealType.objects.get(name__iexact=n)
+        except MealType.DoesNotExist: pass
+    if mt is None and id:
+        try: mt = MealType.objects.get(id=id)
+        except MealType.DoesNotExist: pass
+    return mt
 
-def group_food_items_by_meal_type(food_items_data):
-    grouped_data = {'breakfast': [], 'lunch': [], 'snacks': [], 'dinner': []}
-    for item_data in food_items_data:
-        meal_type_name = item_data.get('meal_type_name', '').strip() if item_data.get('meal_type_name') else None
-        if meal_type_name:
-            name_lower = meal_type_name.lower()
-            matched_key = MEAL_TYPE_GROUPING_MAP.get(name_lower)
-            if matched_key:
-                grouped_data[matched_key].append(item_data)
-            else:
-                grouped_data['snacks'].append(item_data)
-        else:
-            grouped_data['snacks'].append(item_data)
-    return grouped_data
+def group_food_items_by_meal_type(data):
+    grouped = {'breakfast': [], 'lunch': [], 'snacks': [], 'dinner': []}
+    for item in data:
+        name = item.get('meal_type_name', '').lower() if item.get('meal_type_name') else ''
+        key = MEAL_TYPE_GROUPING_MAP.get(name, 'snacks')
+        grouped[key].append(item)
+    return grouped
 
 def extract_nutrition_data(nutrients):
-    nutrient_map = {n.get("name", "").lower(): float(n.get("amount", 0) or 0) for n in nutrients}
+    m = {n.get("name", "").lower(): float(n.get("amount", 0) or 0) for n in nutrients}
     return {
-        "calories": nutrient_map.get("calories", 0),
-        "protein": nutrient_map.get("protein", 0),
-        "fat": nutrient_map.get("fat", 0),
-        "saturated_fat": nutrient_map.get("saturated fat", 0),
-        "trans_fat": nutrient_map.get("trans fat", 0),
-        "carbohydrates": nutrient_map.get("carbohydrates", 0),
-        "fiber": nutrient_map.get("fiber", 0),
-        "sugar": nutrient_map.get("sugar", 0),
-        "cholesterol": nutrient_map.get("cholesterol", 0),
-        "sodium": nutrient_map.get("sodium", 0),
-        "calcium": nutrient_map.get("calcium", 0),
-        "iron": nutrient_map.get("iron", 0),
-        "potassium": nutrient_map.get("potassium", 0),
-        "zinc": nutrient_map.get("zinc", 0),
-        "vitaminA": nutrient_map.get("vitamin a", 0),
-        "vitaminC": nutrient_map.get("vitamin c", 0),
-        "vitaminD": nutrient_map.get("vitamin d", 0),
-        "vitaminE": nutrient_map.get("vitamin e", 0),
-        "vitaminK": nutrient_map.get("vitamin k", 0),
+        "calories": m.get("calories", 0), "protein": m.get("protein", 0),
+        "fat": m.get("fat", 0), "carbohydrates": m.get("carbohydrates", 0),
+        "saturated_fat": m.get("saturated fat", 0), "trans_fat": m.get("trans fat", 0),
+        "fiber": m.get("fiber", 0), "sugar": m.get("sugar", 0),
+        "cholesterol": m.get("cholesterol", 0), "sodium": m.get("sodium", 0),
+        "calcium": m.get("calcium", 0), "iron": m.get("iron", 0),
+        "potassium": m.get("potassium", 0), "zinc": m.get("zinc", 0),
+        "vitaminA": m.get("vitamin a", 0), "vitaminC": m.get("vitamin c", 0),
+        "vitaminD": m.get("vitamin d", 0), "vitaminE": m.get("vitamin e", 0), "vitaminK": m.get("vitamin k", 0),
     }
 
-def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "food-item-v1-recognition", app_id: str = "main"):
-    url = f"https://api.clarifai.com/v2/models/{model_id}/outputs"
-    headers = {"Authorization": f"Key {pat}", "Content-Type": "application/json"}
-    data = {"user_app_id": {"user_id": "clarifai", "app_id": app_id}, "inputs": [{"data": {"image": {"base64": base64_image}}}]}
-    response = rq.post(url, headers=headers, json=data, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-class SpoonacularAPIError(Exception): pass
-class SpoonacularDataError(Exception): pass
-
-def get_spoonacular_data(food_name: str):
-    url = "https://api.spoonacular.com/recipes/complexSearch"
-    params = {"query": food_name, "number": 1, "addRecipeNutrition": "true", "apiKey": SPOONACULAR_API_KEY}
-    response = rq.get(url, params=params, timeout=30)
-    if response.status_code != 200: raise SpoonacularAPIError(f"Spoonacular error: {response.status_code}")
-    result = response.json()
-    results = result.get("results", [])
-    if not results: raise SpoonacularDataError("No results found")
-    recipe = results[0]
-    nutrition = recipe.get("nutrition", {})
-    nutrients = nutrition.get("nutrients", [])
-    data = extract_nutrition_data(nutrients)
-    data["food_name"] = recipe.get("title", food_name)
-    return data
-
-def get_spoonacular_recipe_by_id(recipe_id: int):
-    url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
-    params = {"includeNutrition": "true", "apiKey": SPOONACULAR_API_KEY}
-    response = rq.get(url, params=params, timeout=30)
-    if response.status_code != 200: raise SpoonacularAPIError("Spoonacular error")
-    recipe = response.json()
-    nutrients = recipe.get("nutrition", {}).get("nutrients", [])
-    data = extract_nutrition_data(nutrients)
-    data["food_name"] = recipe.get("title", f"Recipe {recipe_id}")
-    return data
-
 # --- Views ---
-
 class FoodRecognitionView(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request):
         serializer = FoodRecognitionRequestSerializer(data=request.data)
         if not serializer.is_valid(): return Response(serializer.errors, status=400)
         try:
-            image_bytes = serializer.validated_data["image"].read()
-            base64_image = base64.b64encode(image_bytes).decode("utf-8")
-            prediction = predict_clarifai_by_base64(base64_image, CLARIFAI_PAT)
+            img = base64.b64encode(serializer.validated_data["image"].read()).decode("utf-8")
+            url = "https://api.clarifai.com/v2/models/food-item-v1-recognition/outputs"
+            headers = {"Authorization": f"Key {CLARIFAI_PAT}", "Content-Type": "application/json"}
+            payload = {"user_app_id": {"user_id": "clarifai", "app_id": "main"}, "inputs": [{"data": {"image": {"base64": img}}}]}
+            prediction = rq.post(url, headers=headers, json=payload, timeout=30).json()
             concepts = prediction["outputs"][0]["data"]["concepts"]
-            if not concepts: return Response({"error": "No prediction"}, status=500)
-            nutrition_data = get_spoonacular_data(concepts[0]["name"])
-            meal_type = resolve_meal_type(serializer.validated_data.get("meal_type"), serializer.validated_data.get("meal_type_name"))
-            food_item = FoodItem.objects.create(
-                user=request.user, name=nutrition_data['food_name'],
-                calories=nutrition_data['calories'], protein=nutrition_data['protein'],
-                carbohydrates=nutrition_data['carbohydrates'], fats=nutrition_data['fat'],
-                meal_type=meal_type
+            if not concepts: return Response({"error": "No food found"}, status=500)
+            
+            # Spoonacular
+            s_url = "https://api.spoonacular.com/recipes/complexSearch"
+            s_params = {"query": concepts[0]["name"], "number": 1, "addRecipeNutrition": "true", "apiKey": SPOONACULAR_API_KEY}
+            s_res = rq.get(s_url, params=s_params, timeout=30).json()
+            if not s_res.get("results"): return Response({"error": "No nutrition found"}, status=500)
+            
+            recipe = s_res["results"][0]
+            nutri = extract_nutrition_data(recipe.get("nutrition", {}).get("nutrients", []))
+            mt = resolve_meal_type(serializer.validated_data.get("meal_type"), serializer.validated_data.get("meal_type_name"))
+            
+            food = FoodItem.objects.create(
+                user=request.user, name=recipe.get("title", concepts[0]["name"]),
+                calories=nutri['calories'], protein=nutri['protein'],
+                carbohydrates=nutri['carbohydrates'], fats=nutri['fat'], meal_type=mt
             )
-            res = nutrition_data.copy()
-            res.update({'id': food_item.id, 'name': food_item.name, 'created_at': food_item.date})
-            return Response(res, status=201)
-        except Exception as e: return Response({"error": str(e)}, status=500)
-
-class AddRecipeView(APIView):
-    permission_classes = [IsAuthenticated]
-    def post(self, request):
-        serializer = AddRecipeRequestSerializer(data=request.data)
-        if not serializer.is_valid(): return Response(serializer.errors, status=400)
-        try:
-            nutrition_data = get_spoonacular_recipe_by_id(serializer.validated_data["recipe_id"])
-            meal_type = resolve_meal_type(serializer.validated_data.get("meal_type"), serializer.validated_data.get("meal_type_name"))
-            food_item = FoodItem.objects.create(
-                user=request.user, name=nutrition_data['food_name'],
-                calories=nutrition_data['calories'], protein=nutrition_data['protein'],
-                carbohydrates=nutrition_data['carbohydrates'], fats=nutrition_data['fat'],
-                meal_type=meal_type, trans_fat=nutrition_data['trans_fat'],
-                saturated_fat=nutrition_data['saturated_fat'], vitamin_a=nutrition_data['vitaminA'],
-                vitamin_c=nutrition_data['vitaminC'], vitamin_d=nutrition_data['vitaminD'],
-                vitamin_e=nutrition_data['vitaminE'], vitamin_k=nutrition_data['vitaminK'],
-                mineral_calcium=nutrition_data['calcium'], mineral_iron=nutrition_data['iron'],
-                mineral_sodium=nutrition_data['sodium'], mineral_potassium=nutrition_data['potassium'],
-                mineral_zink=nutrition_data['zinc'],
-            )
-            res = nutrition_data.copy()
-            res.update({'id': food_item.id, 'name': food_item.name, 'created_at': food_item.date})
+            res = nutri.copy()
+            res.update({'id': food.id, 'name': food.name, 'created_at': food.date})
             return Response(res, status=201)
         except Exception as e: return Response({"error": str(e)}, status=500)
 
 class FoodItemByDateView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
-        date_param = request.query_params.get('date')
-        queryset = FoodItem.objects.filter(user=request.user)
+        d_param = request.query_params.get('date')
         try:
-            target_date = parse_date_custom(date_param) if date_param else date.today()
-            start = datetime.combine(target_date, datetime.min.time())
-            end = start + timedelta(days=1)
-            queryset = queryset.filter(date__gte=start, date__lt=end).order_by('-date').select_related('meal_type')
-            serializer = FoodItemSerializer(queryset, many=True)
-            return Response(group_food_items_by_meal_type(serializer.data))
-        except ValueError: return Response({'error': 'Invalid date'}, status=400)
+            td = parse_date_custom(d_param) if d_param else date.today()
+            start = datetime.combine(td, datetime.min.time())
+            qs = FoodItem.objects.filter(user=request.user, date__gte=start, date__lt=start+timedelta(days=1)).order_by('-date')
+            data = FoodItemSerializer(qs, many=True).data
+            # Decimal fix for SQLite
+            for item in data:
+                for f in ['calories', 'protein', 'carbohydrates', 'fats']:
+                    if item.get(f) is not None: item[f] = float(item[f])
+            return Response(group_food_items_by_meal_type(data))
+        except Exception as e: return Response({'error': str(e)}, status=400)
+
+class DailyStatsView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        d_param = request.query_params.get('date')
+        try:
+            td = parse_date_custom(d_param) if d_param else timezone.now().date()
+            s = FoodItem.objects.filter(user=request.user, date__date=td).aggregate(
+                cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
+                va=Sum('vitamin_a'), vc=Sum('vitamin_c'), vd=Sum('vitamin_d'), ve=Sum('vitamin_e'), vk=Sum('vitamin_k'),
+                ca=Sum('mineral_calcium'), fe=Sum('mineral_iron'), na=Sum('mineral_sodium'), k=Sum('mineral_potassium'), zn=Sum('mineral_zink')
+            )
+            f = lambda v: round(float(v or 0), 2)
+            return Response({
+                "overall": {"calories": f(s['cal']), "protein": f(s['pro']), "carbohydrates": f(s['carb']), "fats": f(s['fat'])},
+                "vitamins": {"vitamin_a": f(s['va']), "vitamin_c": f(s['vc']), "vitamin_d": f(s['vd']), "vitamin_e": f(s['ve']), "vitamin_k": f(s['vk'])},
+                "minerals": {"mineral_calcium": f(s['ca']), "mineral_iron": f(s['fe']), "mineral_sodium": f(s['na']), "mineral_potassium": f(s['k']), "mineral_zink": f(s['zn'])}
+            })
+        except Exception as e: return Response({'error': str(e)}, status=400)
 
 class FoodItemUpdateView(generics.UpdateAPIView):
     serializer_class = FoodItemUpdateSerializer
@@ -233,10 +164,10 @@ class FoodItemDeleteView(generics.DestroyAPIView):
 class WaterIntakeCreateView(generics.CreateAPIView):
     serializer_class = WaterIntakeSerializer
     permission_classes = [IsAuthenticated]
-    def perform_create(self, serializer):
-        it = serializer.validated_data.get('intake_type') or self.request.user.water_intake_type_preference
-        if not it: raise ValidationError({"intake_type": "No preference set."})
-        serializer.save(user=self.request.user, intake_type=it)
+    def perform_create(self, s):
+        it = s.validated_data.get('intake_type') or self.request.user.water_intake_type_preference
+        if not it: raise ValidationError("No preference set")
+        s.save(user=self.request.user, intake_type=it)
 
 class WaterIntakeDeleteView(generics.DestroyAPIView):
     serializer_class = WaterIntakeSerializer
@@ -246,47 +177,26 @@ class WaterIntakeDeleteView(generics.DestroyAPIView):
 class WaterIntakeDailyTotalView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
-        d_param = request.query_params.get('date')
-        try:
-            td = parse_date_custom(d_param) if d_param else date.today()
-            agg = WaterIntake.objects.filter(user=request.user, date=td).aggregate(total=Sum('intake_type__amount_ml'))
-            liters = (agg['total'] or 0) / 1000
-            return Response({"date": str(td), "total_liters": f"{liters:.2f}"})
-        except ValueError: return Response({'error': 'Invalid date'}, status=400)
-
-class DailyStatsView(APIView):
-    permission_classes = [IsAuthenticated]
-    def get(self, request):
-        d_param = request.query_params.get('date')
-        try:
-            td = parse_date_custom(d_param) if d_param else timezone.now().date()
-            stats = FoodItem.objects.filter(user=request.user, date__date=td).aggregate(
-                cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
-                va=Sum('vitamin_a'), vc=Sum('vitamin_c'), vd=Sum('vitamin_d'), ve=Sum('vitamin_e'), vk=Sum('vitamin_k'),
-                ca=Sum('mineral_calcium'), fe=Sum('mineral_iron'), na=Sum('mineral_sodium'), k=Sum('mineral_potassium'), zn=Sum('mineral_zink')
-            )
-            return Response({
-                "overall": {"calories": stats['cal'] or 0, "protein": stats['pro'] or 0, "carbohydrates": stats['carb'] or 0, "fats": stats['fat'] or 0},
-                "vitamins": {"vitamin_a": stats['va'] or 0, "vitamin_c": stats['vc'] or 0, "vitamin_d": stats['vd'] or 0, "vitamin_e": stats['ve'] or 0, "vitamin_k": stats['vk'] or 0},
-                "minerals": {"mineral_calcium": stats['ca'] or 0, "mineral_iron": stats['fe'] or 0, "mineral_sodium": stats['na'] or 0, "mineral_potassium": stats['k'] or 0, "mineral_zink": stats['zn'] or 0}
-            })
-        except ValueError: return Response({'error': 'Invalid date'}, status=400)
+        d = parse_date_custom(request.query_params.get('date')) if request.query_params.get('date') else date.today()
+        agg = WaterIntake.objects.filter(user=request.user, date=d).aggregate(t=Sum('intake_type__amount_ml'))
+        return Response({"date": str(d), "total_liters": f"{(agg['t'] or 0)/1000:.2f}"})
 
 class WeeklyFoodStatsView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
         today = date.today()
         start = today - timedelta(days=today.weekday())
-        stats = FoodItem.objects.filter(user=request.user, date__date__range=[start, today]).aggregate(
+        s = FoodItem.objects.filter(user=request.user, date__date__range=[start, today]).aggregate(
             cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
             va=Sum('vitamin_a'), vc=Sum('vitamin_c'), vd=Sum('vitamin_d'), ve=Sum('vitamin_e'), vk=Sum('vitamin_k'),
             ca=Sum('mineral_calcium'), fe=Sum('mineral_iron'), na=Sum('mineral_sodium'), k=Sum('mineral_potassium'), zn=Sum('mineral_zink')
         )
+        f = lambda v: round(float(v or 0), 2)
         return Response({
             "week_range": f"{start} to {today}",
-            "overall": {"calories": stats['cal'] or 0, "protein": stats['pro'] or 0, "carbohydrates": stats['carb'] or 0, "fats": stats['fat'] or 0},
-            "vitamins": {"vitamin_a": stats['va'] or 0, "vitamin_c": stats['vc'] or 0, "vitamin_d": stats['vd'] or 0, "vitamin_e": stats['ve'] or 0, "vitamin_k": stats['vk'] or 0},
-            "minerals": {"mineral_calcium": stats['ca'] or 0, "mineral_iron": stats['fe'] or 0, "mineral_sodium": stats['na'] or 0, "mineral_potassium": stats['k'] or 0, "mineral_zink": stats['zn'] or 0}
+            "overall": {"calories": f(s['cal']), "protein": f(s['pro']), "carbohydrates": f(s['carb']), "fats": f(s['fat'])},
+            "vitamins": {"vitamin_a": f(s['va']), "vitamin_c": f(s['vc']), "vitamin_d": f(s['vd']), "vitamin_e": f(s['ve']), "vitamin_k": f(s['vk'])},
+            "minerals": {"mineral_calcium": f(s['ca']), "mineral_iron": f(s['fe']), "mineral_sodium": f(s['na']), "mineral_potassium": f(s['k']), "mineral_zink": f(s['zn'])}
         })
 
 class RangeFoodStatsView(APIView):
@@ -294,21 +204,20 @@ class RangeFoodStatsView(APIView):
     def get(self, request):
         s_str, e_str = request.query_params.get('start_date'), request.query_params.get('end_date')
         if not s_str or not e_str: return Response({"error": "Dates required"}, status=400)
-        try:
-            s_d, e_d = parse_date_custom(s_str), parse_date_custom(e_str)
-            stats = FoodItem.objects.filter(user=request.user, date__date__range=[s_d, e_d]).aggregate(
-                cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
-                va=Sum('vitamin_a'), vc=Sum('vitamin_c'), vd=Sum('vitamin_d'), ve=Sum('vitamin_e'), vk=Sum('vitamin_k'),
-                ca=Sum('mineral_calcium'), fe=Sum('mineral_iron'), na=Sum('mineral_sodium'), k=Sum('mineral_potassium'), zn=Sum('mineral_zink')
-            )
-            data = {
-                "range": {"start": s_str, "end": e_str},
-                "overall": {"calories": stats['cal'] or 0, "protein": stats['pro'] or 0, "carbohydrates": stats['carb'] or 0, "fats": stats['fat'] or 0},
-                "vitamins": {"vitamin_a": stats['va'] or 0, "vitamin_c": stats['vc'] or 0, "vitamin_d": stats['vd'] or 0, "vitamin_e": stats['ve'] or 0, "vitamin_k": stats['vk'] or 0},
-                "minerals": {"mineral_calcium": stats['ca'] or 0, "mineral_iron": stats['fe'] or 0, "mineral_sodium": stats['na'] or 0, "mineral_potassium": stats['k'] or 0, "mineral_zink": stats['zn'] or 0}
-            }
-            return Response(FoodStatsResponseSerializer(data).data)
-        except ValueError: return Response({'error': 'Invalid date'}, status=400)
+        s_d, e_d = parse_date_custom(s_str), parse_date_custom(e_str)
+        st = FoodItem.objects.filter(user=request.user, date__date__range=[s_d, e_d]).aggregate(
+            cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
+            va=Sum('vitamin_a'), vc=Sum('vitamin_c'), vd=Sum('vitamin_d'), ve=Sum('vitamin_e'), vk=Sum('vitamin_k'),
+            ca=Sum('mineral_calcium'), fe=Sum('mineral_iron'), na=Sum('mineral_sodium'), k=Sum('mineral_potassium'), zn=Sum('mineral_zink')
+        )
+        f = lambda v: round(float(v or 0), 2)
+        data = {
+            "range": {"start": s_str, "end": e_str},
+            "overall": {"calories": f(st['cal']), "protein": f(st['pro']), "carbohydrates": f(st['carb']), "fats": f(st['fat'])},
+            "vitamins": {"vitamin_a": f(st['va']), "vitamin_c": f(st['vc']), "vitamin_d": f(st['vd']), "vitamin_e": f(st['ve']), "vitamin_k": f(st['vk'])},
+            "minerals": {"mineral_calcium": f(st['ca']), "mineral_iron": f(st['fe']), "mineral_sodium": f(st['na']), "mineral_potassium": f(st['k']), "mineral_zink": f(st['zn'])}
+        }
+        return Response(FoodStatsResponseSerializer(data).data)
 
 class WaterIntakeTypeListView(generics.ListAPIView):
     queryset = WaterIntakeType.objects.all()
@@ -329,3 +238,29 @@ class MealTypeListView(generics.ListAPIView):
     queryset = MealType.objects.all()
     serializer_class = MealTypeListSerializer
     permission_classes = [IsAuthenticated]
+
+class AddRecipeView(APIView): # Ehtiyat üçün sonda saxladım
+    permission_classes = [IsAuthenticated]
+    def post(self, request):
+        serializer = AddRecipeRequestSerializer(data=request.data)
+        if not serializer.is_valid(): return Response(serializer.errors, status=400)
+        try:
+            url = f"https://api.spoonacular.com/recipes/{serializer.validated_data['recipe_id']}/information"
+            params = {"includeNutrition": "true", "apiKey": SPOONACULAR_API_KEY}
+            r = rq.get(url, params=params, timeout=30).json()
+            nutri = extract_nutrition_data(r.get("nutrition", {}).get("nutrients", []))
+            mt = resolve_meal_type(serializer.validated_data.get("meal_type"), serializer.validated_data.get("meal_type_name"))
+            food = FoodItem.objects.create(
+                user=request.user, name=r.get("title", "Recipe"),
+                calories=nutri['calories'], protein=nutri['protein'],
+                carbohydrates=nutri['carbohydrates'], fats=nutri['fat'],
+                meal_type=mt, trans_fat=nutri['trans_fat'], saturated_fat=nutri['saturated_fat'],
+                vitamin_a=nutri['vitaminA'], vitamin_c=nutri['vitaminC'], vitamin_d=nutri['vitaminD'],
+                vitamin_e=nutri['vitaminE'], vitamin_k=nutri['vitaminK'],
+                mineral_calcium=nutri['calcium'], mineral_iron=nutri['iron'],
+                mineral_sodium=nutri['sodium'], mineral_potassium=nutri['potassium'], mineral_zink=nutri['zinc'],
+            )
+            res = nutri.copy()
+            res.update({'id': food.id, 'name': food.name, 'created_at': food.date})
+            return Response(res, status=201)
+        except Exception as e: return Response({"error": str(e)}, status=500)
