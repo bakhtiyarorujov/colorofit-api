@@ -755,6 +755,7 @@ class WaterIntakeDailyTotalView(APIView):
 )
 class DailyStatsView(APIView):
     permission_classes = [IsAuthenticated]
+    queryset = FoodItem.objects.none()
     def get(self, request):
         # Filter for today's food items for the logged-in user
         today = timezone.now().date()
