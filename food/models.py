@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth import get_user_model
-from users.models import WaterIntakeType
+from users.models import WaterIntakeType, WaterIntakeUnit
 User = get_user_model()
 # Create your models here.
 class MealType(models.Model):

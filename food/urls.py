@@ -2,7 +2,7 @@ from django.urls import path
 from .views import FoodRecognitionView, FoodItemByDateView, FoodItemUpdateView, FoodItemDeleteView \
     , WaterIntakeCreateView, WaterIntakeDeleteView, WaterIntakeDailyTotalView, AddRecipeView \
     , DailyStatsView, WeeklyFoodStatsView, RangeFoodStatsView, WaterIntakeTypeListView, SetWaterIntakePreferenceView \
-    , MealTypeListView
+    , MealTypeListView, WaterIntakeGoalPreferenceUpdateView
 
 urlpatterns = [
     path("predict-food/", FoodRecognitionView.as_view(), name="predict-food"),
@@ -18,5 +18,5 @@ urlpatterns = [
     path("weekly-food-stats/", WeeklyFoodStatsView.as_view(), name="weekly-food-stats"),
     path("range-food-stats/", RangeFoodStatsView.as_view(), name="range-food-stats"),
     path("water-intake-types/", WaterIntakeTypeListView.as_view(), name="water-intake-types"),
-    path("set-water-intake-preference/", SetWaterIntakePreferenceView.as_view(), name="set-water-intake-preference"),
+    path("set-water-intake-preference-goal/", WaterIntakeGoalPreferenceUpdateView.as_view(), name="set-water-intake-preference"),
 ]

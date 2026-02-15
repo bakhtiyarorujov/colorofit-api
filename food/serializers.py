@@ -1,6 +1,10 @@
 import decimal
 from rest_framework import serializers
 from .models import FoodItem, WaterIntake, WaterIntakeType, MealType
+from users.models import WaterIntakeUnit
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
 
 
 def safe_decimal_to_string(value):
@@ -96,11 +100,15 @@ class FoodStatsResponseSerializer(serializers.Serializer):
     vitamins = VitaminGroupSerializer()
     minerals = MineralGroupSerializer()
 
+class WaterIntakeUnitSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WaterIntakeUnit
+        fields = ['id', 'name']
 
 class WaterIntakeTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = WaterIntakeType
-        fields = ['id', 'name', 'amount_ml']
+        fields = ['id', 'name']
 
 
 class WaterIntakePreferenceSerializer(serializers.Serializer):
@@ -112,6 +120,13 @@ class WaterIntakePreferenceSerializer(serializers.Serializer):
     class Meta:
         fields = ['water_intake_type_id']
 
+class WaterIntakePreferenceGoalUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = [
+            'water_intake_goal_ml',
+            'water_intake_type_preference'
+        ]
 
 class MealTypeListSerializer(serializers.ModelSerializer):
     class Meta:

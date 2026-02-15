@@ -12,10 +12,10 @@ from rest_framework.response import Response
 from rest_framework import status
 import requests as rq
 from .models import FoodItem, WaterIntake, MealType, WaterIntakeType
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
     , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer, WaterIntakePreferenceSerializer \
-    , MealTypeListSerializer
+    , MealTypeListSerializer, WaterIntakeTypeSerializer, WaterIntakePreferenceGoalUpdateSerializer
 from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
@@ -979,9 +979,8 @@ class WaterIntakeTypeListView(generics.ListAPIView):
     View to list all available water intake types (e.g., 200ml, 500ml).
     """
     queryset = WaterIntakeType.objects.all()  # pylint: disable=no-member
-    serializer_class = WaterIntakeSerializer
-    permission_classes = [IsAuthenticated]
-
+    serializer_class = WaterIntakeTypeSerializer
+    permission_classes = [AllowAny]
 
 @extend_schema(
     methods=['PATCH'],
@@ -1028,3 +1027,32 @@ class MealTypeListView(generics.ListAPIView):
     queryset = MealType.objects.all()  # pylint: disable=no-member
     serializer_class = MealTypeListSerializer
     permission_classes = [IsAuthenticated]
+
+@extend_schema(
+    tags=['Water Intake'],
+    summary="Update water intake goal and preference",
+    description="Updates the authenticated user's water goal (ml) and type preference.",
+    # Define the request body example
+    request=WaterIntakePreferenceGoalUpdateSerializer,
+    examples=[
+        OpenApiExample(
+            'Valid Request Example',
+            value={
+                'water_intake_goal_ml': 2500,
+                'water_intake_type_preference': 1 # Assuming ID of WaterIntakeType
+            },
+            request_only=True,
+            response_only=False,
+        ),
+    ],
+    # Define the response body example (usually the updated object)
+    responses={
+        200: WaterIntakePreferenceGoalUpdateSerializer,
+    }
+)
+class WaterIntakeGoalPreferenceUpdateView(generics.UpdateAPIView):
+    serializer_class = WaterIntakePreferenceGoalUpdateSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user

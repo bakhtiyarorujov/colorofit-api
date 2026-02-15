@@ -1,8 +1,8 @@
 from django.contrib import admin
-from .models import MealType, FoodItem, WaterIntakeType, WaterIntake
+from .models import MealType, FoodItem, WaterIntakeType, WaterIntake, WaterIntakeUnit
 # Register your models here.
 
-@admin.register(MealType)
+@admin.register(MealType)   
 class MealTypeAdmin(admin.ModelAdmin):
     list_display = ('name',)
     list_display_links = ('name',)
@@ -27,3 +27,9 @@ class WaterIntakeAdmin(admin.ModelAdmin):
     list_display_links = ('user',)
     search_fields = ('user__username',)
     list_filter = ('intake_type', 'date')
+
+@admin.register(WaterIntakeUnit)
+class WaterIntakeUnitAdmin(admin.ModelAdmin):
+    list_display = ('name',)
+    list_display_links = ('name',)
+    search_fields = ('name',)

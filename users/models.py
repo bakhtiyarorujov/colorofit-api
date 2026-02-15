@@ -2,13 +2,18 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 # Create your models here.
 
+class WaterIntakeUnit(models.Model):
+    name = models.CharField(max_length=50)
+
+    def __str__(self):
+        return self.name
 
 class WaterIntakeType(models.Model):
     name = models.CharField(max_length=100)
     amount_ml = models.PositiveIntegerField()
 
     def __str__(self):
-        return f"{self.amount_ml} ml"
+        return f"{self.name} ({self.amount_ml} ml)"
 
 class LifeStyle(models.Model):
     name = models.CharField(max_length=100)
