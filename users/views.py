@@ -75,7 +75,7 @@ class GoogleLoginAPIView(APIView):
             idinfo = id_token.verify_oauth2_token(
                 token_id,
                 requests.Request(),
-                "197516977632-8vbn2h7a5slg421nojbge2ftgaasogeg.apps.googleusercontent.com"
+                "504818468430-q53sdgsag9i3oe7a898c3trg1nc2fim6.apps.googleusercontent.com"
             )
             email = idinfo['email']
             first_name = idinfo.get('given_name', '')
