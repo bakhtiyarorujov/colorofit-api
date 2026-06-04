@@ -8,10 +8,12 @@ from google.auth.transport import requests
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
 from .utils import get_tokens_for_user
-from rest_framework.generics import UpdateAPIView, RetrieveAPIView, ListAPIView
+from rest_framework.generics import UpdateAPIView, RetrieveAPIView, ListAPIView, RetrieveUpdateAPIView, CreateAPIView
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import GoogleTokenRequestSerializer, GoogleLoginResponseSerializer \
-    , AppleLoginSerializer, AppleLoginResponseSerializer, UserAimDetailSerializer, TargetDetailSerializer
+    , AppleLoginSerializer, AppleLoginResponseSerializer, UserAimDetailSerializer, TargetDetailSerializer \
+    , UserProfileSerializer, AlertPreferenceSerializer, FeedbackSerializer
 from clarifai.client.model import Model
 from django.core.files.uploadedfile import InMemoryUploadedFile
 User = get_user_model()
@@ -205,4 +207,52 @@ class TargetDetailView(RetrieveAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+@extend_schema(
+    tags=["User"],
+    summary="Get / Update current user's profile",
+    description=(
+        "GET returns the authenticated user's full profile. "
+        "PATCH allows updating name, bio, profile_picture, and body metrics. "
+        "Use multipart/form-data when uploading a profile picture."
+    ),
+)
+class UserProfileView(RetrieveUpdateAPIView):
+    serializer_class = UserProfileSerializer
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_object(self):
+        return self.request.user
+
+
+@extend_schema(
+    tags=["User"],
+    summary="Get / Update alert (notification) preferences",
+    description=(
+        "GET returns the current user's notification toggles. "
+        "PATCH updates any subset of: alert_meal_reminders, "
+        "alert_water_reminders, alert_weekly_summary, alert_goal_achievements."
+    ),
+)
+class AlertPreferenceView(RetrieveUpdateAPIView):
+    serializer_class = AlertPreferenceSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self):
+        return self.request.user
+
+
+@extend_schema(
+    tags=["User"],
+    summary="Submit feedback",
+    description="Create a feedback entry (rating 0..5 + free-form message). Authenticated users only.",
+)
+class FeedbackCreateView(CreateAPIView):
+    serializer_class = FeedbackSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
 

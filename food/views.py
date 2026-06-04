@@ -23,8 +23,10 @@ logger = logging.getLogger(__name__)
 
 # Constants
 CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
-CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
+CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab"
 SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
+GEMINI_API_KEY = "AIzaSyAs65_k_v0RGeTrS2lBe_Fb1JET6r_dHDU"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # Meal type mapping
 MEAL_TYPE_MAPPING = {
@@ -232,6 +234,102 @@ def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "foo
     return response.json()
 
 
+class GeminiAPIError(Exception):
+    """Custom exception for Gemini API errors"""
+
+
+def predict_food_with_gemini(base64_image: str, api_key: str = None):
+    """
+    Use Gemini multimodal model to recognize food and estimate nutrition in one call.
+    Returns dict matching extract_nutrition_data() output plus 'food_name'.
+    """
+    api_key = api_key or GEMINI_API_KEY
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+    )
+
+    prompt = (
+        "You are a nutrition expert. Analyze the food in this image. "
+        "Identify the dish (including regional dishes like Azerbaijani plov, dolma, qutab if present). "
+        "Estimate the visible portion size in grams, then return realistic nutrition values "
+        "for that portion. All numeric values must be numbers (not strings). "
+        "If the image does not contain food, set food_name to an empty string and all numbers to 0."
+    )
+
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "food_name": {"type": "STRING"},
+            "estimated_grams": {"type": "NUMBER"},
+            "calories": {"type": "NUMBER"},
+            "protein": {"type": "NUMBER"},
+            "fat": {"type": "NUMBER"},
+            "saturated_fat": {"type": "NUMBER"},
+            "trans_fat": {"type": "NUMBER"},
+            "carbohydrates": {"type": "NUMBER"},
+            "fiber": {"type": "NUMBER"},
+            "sugar": {"type": "NUMBER"},
+            "cholesterol": {"type": "NUMBER"},
+            "sodium": {"type": "NUMBER"},
+            "calcium": {"type": "NUMBER"},
+            "iron": {"type": "NUMBER"},
+            "potassium": {"type": "NUMBER"},
+            "zinc": {"type": "NUMBER"},
+            "vitaminA": {"type": "NUMBER"},
+            "vitaminC": {"type": "NUMBER"},
+            "vitaminD": {"type": "NUMBER"},
+            "vitaminE": {"type": "NUMBER"},
+            "vitaminK": {"type": "NUMBER"},
+        },
+        "required": ["food_name", "calories", "protein", "fat", "carbohydrates"],
+    }
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}},
+            ]
+        }],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "response_schema": response_schema,
+            "temperature": 0.2,
+        },
+    }
+
+    try:
+        response = rq.post(url, json=payload, timeout=45)
+    except rq.exceptions.RequestException as e:
+        raise GeminiAPIError(f"Gemini API request failed: {str(e)}") from e
+
+    if response.status_code != 200:
+        raise GeminiAPIError(
+            f"Gemini API error: {response.status_code} - {response.text[:300]}"
+        )
+
+    try:
+        data = response.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        import json as _json
+        result = _json.loads(text)
+    except (ValueError, KeyError, IndexError) as e:
+        raise GeminiAPIError(f"Failed to parse Gemini response: {str(e)}") from e
+
+    # Normalize: ensure all expected keys exist with numeric defaults
+    keys_numeric = [
+        "calories", "protein", "fat", "saturated_fat", "trans_fat",
+        "carbohydrates", "fiber", "sugar", "cholesterol", "sodium",
+        "calcium", "iron", "potassium", "zinc",
+        "vitaminA", "vitaminC", "vitaminD", "vitaminE", "vitaminK",
+    ]
+    normalized = {k: float(result.get(k, 0) or 0) for k in keys_numeric}
+    normalized["food_name"] = (result.get("food_name") or "").strip()
+    normalized["estimated_grams"] = float(result.get("estimated_grams", 0) or 0)
+    return normalized
+
+
 class SpoonacularAPIError(Exception):
     """Custom exception for Spoonacular API errors"""
 
@@ -391,17 +489,14 @@ class FoodRecognitionView(APIView):
             image_bytes = image_file.read()
             base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-            # Step 1: Predict food name
-            prediction = predict_clarifai_by_base64(base64_image, CLARIFAI_PAT)
-            concepts = prediction["outputs"][0]["data"]["concepts"]
+            # Recognize food + estimate nutrition in a single Gemini call.
+            nutrition_data = predict_food_with_gemini(base64_image)
 
-            if not concepts:
-                return Response({"error": "No prediction returned"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            food_name = concepts[0]["name"]
-
-            # Step 2: Get nutrition data from Spoonacular
-            nutrition_data = get_spoonacular_data(food_name)
+            if not nutrition_data.get("food_name"):
+                return Response(
+                    {"error": "No food detected in the image"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             # Step 3: Get meal_type if provided
             meal_type_id = serializer.validated_data.get("meal_type")
@@ -430,6 +525,8 @@ class FoodRecognitionView(APIView):
 
         except (KeyError, ValueError) as e:
             return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except GeminiAPIError as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
         except (SpoonacularAPIError, SpoonacularDataError) as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:  # pylint: disable=broad-except
@@ -694,22 +791,38 @@ class WaterIntakeDailyTotalView(APIView):
         else:
             target_date = date.today()
 
-        # 2. Filter by user and date, then aggregate the sum of the related type's amount
-        aggregation = WaterIntake.objects.filter(  # pylint: disable=no-member
-            user=request.user, 
+        # 2. Filter by user and date, get logs and aggregate
+        logs_qs = WaterIntake.objects.filter(  # pylint: disable=no-member
+            user=request.user,
             date=target_date
-        ).aggregate(total_ml=Sum('intake_type__amount_ml'))
+        ).select_related('intake_type').order_by('-id')
 
-        # 3. Handle the result (result is None if no records exist)
+        aggregation = logs_qs.aggregate(total_ml=Sum('intake_type__amount_ml'))
         total_ml = aggregation['total_ml'] or 0
-        
-        # 4. Convert to Liters
         total_liters = total_ml / 1000
 
-        # 5. Return formatted response (2 decimal places)
+        # 3. Get user goal (ml) — default to 2000 if not set
+        goal_ml = request.user.water_intake_goal_ml or 2000
+        progress = min(round((total_ml / goal_ml) * 100, 2), 100) if goal_ml else 0
+
+        # 4. Serialize today's logs so client can show/delete them
+        logs = [
+            {
+                "id": log.id,
+                "intake_type_id": log.intake_type_id,
+                "intake_type_name": log.intake_type.name if log.intake_type else None,
+                "amount_ml": log.intake_type.amount_ml if log.intake_type else 0,
+            }
+            for log in logs_qs
+        ]
+
         return Response({
             "date": str(target_date),
-            "total_liters": f"{total_liters:.2f}"
+            "total_ml": total_ml,
+            "total_liters": f"{total_liters:.2f}",
+            "water_intake_goal_ml": goal_ml,
+            "progress_percent": progress,
+            "logs": logs,
         })
 
 @extend_schema(
@@ -835,27 +948,52 @@ class WeeklyFoodStatsView(APIView):
         # Find the start of the week (Monday)
         # weekday() returns 0 for Monday, 6 for Sunday
         start_of_week = today - timedelta(days=today.weekday())
-        
+        end_of_week = start_of_week + timedelta(days=6)
+
         # Aggregate data between start_of_week and today
         stats = FoodItem.objects.filter(
             user=request.user,
             date__date__range=[start_of_week, today]
         ).aggregate(
             cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
-            v_a=Sum('vitamin_a'), v_c=Sum('vitamin_c'), v_d=Sum('vitamin_d'), 
+            v_a=Sum('vitamin_a'), v_c=Sum('vitamin_c'), v_d=Sum('vitamin_d'),
             v_e=Sum('vitamin_e'), v_k=Sum('vitamin_k'),
-            m_ca=Sum('mineral_calcium'), m_fe=Sum('mineral_iron'), 
+            m_ca=Sum('mineral_calcium'), m_fe=Sum('mineral_iron'),
             m_na=Sum('mineral_sodium'), m_k=Sum('mineral_potassium'), m_zn=Sum('mineral_zink')
         )
 
+        # Per-day breakdown (Mon..Sun)
+        day_labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        days_payload = []
+        for i in range(7):
+            current = start_of_week + timedelta(days=i)
+            day_stats = FoodItem.objects.filter(
+                user=request.user,
+                date__date=current
+            ).aggregate(
+                cal=Sum('calories'),
+                pro=Sum('protein'),
+                carb=Sum('carbohydrates'),
+                fat=Sum('fats'),
+            )
+            days_payload.append({
+                "date": current.isoformat(),
+                "day_label": day_labels[i],
+                "calories": float(day_stats['cal'] or 0),
+                "protein": float(day_stats['pro'] or 0),
+                "carbohydrates": float(day_stats['carb'] or 0),
+                "fats": float(day_stats['fat'] or 0),
+            })
+
         return Response({
-            "week_range": f"{start_of_week} to {today}",
+            "week_range": f"{start_of_week} to {end_of_week}",
             "overall": {
                 "calories": stats['cal'] or 0,
                 "protein": stats['pro'] or 0,
                 "carbohydrates": stats['carb'] or 0,
                 "fats": stats['fat'] or 0
             },
+            "days": days_payload,
             "vitamins": {
                 "vitamin_a": stats['v_a'] or 0,
                 "vitamin_c": stats['v_c'] or 0,
@@ -1056,3 +1194,66 @@ class WaterIntakeGoalPreferenceUpdateView(generics.UpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+# ---------------------------------------------------------------------------
+# Spoonacular proxy (keeps the API key server-side, off the mobile binary)
+# ---------------------------------------------------------------------------
+
+class SpoonacularRecipeSearchView(APIView):
+    """
+    GET /food/recipes/search/?query=<term>&number=<n>
+    Proxies Spoonacular complexSearch with nutrition included.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        query = request.query_params.get('query', '').strip()
+        number = request.query_params.get('number', '50')
+        if not query:
+            return Response({'detail': 'query is required'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            resp = rq.get(
+                'https://api.spoonacular.com/recipes/complexSearch',
+                params={
+                    'query': query,
+                    'number': number,
+                    'addRecipeNutrition': 'true',
+                    'apiKey': SPOONACULAR_API_KEY,
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning('Spoonacular search error %s: %s', resp.status_code, resp.text[:200])
+                return Response({'detail': 'Upstream error', 'status': resp.status_code},
+                                status=status.HTTP_502_BAD_GATEWAY)
+            return Response(resp.json(), status=status.HTTP_200_OK)
+        except rq.RequestException as e:
+            logger.exception('Spoonacular search exception: %s', e)
+            return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class SpoonacularRecipeDetailView(APIView):
+    """
+    GET /food/recipes/<int:recipe_id>/
+    Proxies Spoonacular recipe information (with nutrition).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, recipe_id):
+        try:
+            resp = rq.get(
+                f'https://api.spoonacular.com/recipes/{recipe_id}/information',
+                params={
+                    'apiKey': SPOONACULAR_API_KEY,
+                    'includeNutrition': 'true',
+                },
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning('Spoonacular detail error %s: %s', resp.status_code, resp.text[:200])
+                return Response({'detail': 'Upstream error', 'status': resp.status_code},
+                                status=status.HTTP_502_BAD_GATEWAY)
+            return Response(resp.json(), status=status.HTTP_200_OK)
+        except rq.RequestException as e:
+            logger.exception('Spoonacular detail exception: %s', e)
+            return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
