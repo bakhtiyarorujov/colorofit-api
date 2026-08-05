@@ -26,7 +26,7 @@ User = get_user_model()
 # --- OAuth configuration (env-driven, with safe fallbacks) ---
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get(
     "GOOGLE_OAUTH_CLIENT_ID",
-    "504818468430-q53sdgsag9i3oe7a898c3trg1nc2fim6.apps.googleusercontent.com",
+    "197516977632-78h87uce10pv6eja01j3atu96sq7oaai.apps.googleusercontent.com",
 )
 
 APPLE_ISSUER = "https://appleid.apple.com"
