@@ -3,6 +3,18 @@ from .models import User, Feedback
 from datetime import date
 
 
+def is_profile_complete(user):
+    """True when the user has finished onboarding (has the core body metrics),
+    so the app can skip onboarding on a returning login."""
+    return bool(
+        user.gender
+        and user.age
+        and user.height
+        and user.weight
+        and user.life_style
+    )
+
+
 # Request Serializer
 class GoogleTokenRequestSerializer(serializers.Serializer):
     token = serializers.CharField(help_text="Google ID token from client")
@@ -29,6 +41,11 @@ class AppleLoginSerializer(serializers.Serializer):
 class AppleLoginResponseSerializer(serializers.Serializer):
     user = UserSerializer()
     tokens = serializers.DictField(child=serializers.CharField())
+    profile_complete = serializers.SerializerMethodField()
+
+    def get_profile_complete(self, obj) -> bool:
+        user = obj['user'] if isinstance(obj, dict) else obj.user
+        return is_profile_complete(user)
 
 
 class UserAimDetailSerializer(serializers.ModelSerializer):
@@ -73,7 +90,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         )
         read_only_fields = ('id', 'email', 'username', 'full_name')
 
-    def get_full_name(self, obj):
+    def get_full_name(self, obj) -> str:
         name = f"{obj.first_name or ''} {obj.last_name or ''}".strip()
         return name or (obj.username or '').split('@')[0]
 
@@ -125,7 +142,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
             'mineral_targets',
         )
 
-    def get_tdee(self, obj):
+    def get_tdee(self, obj) -> int:
         # Safety Check: If any required field is missing, return 0
         if not all([obj.weight, obj.height, obj.age, obj.gender]):
             return 0
@@ -150,7 +167,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         tdee = bmr * activity_factor
         return round(tdee)
     
-    def get_daily_deficit(self, obj):
+    def get_daily_deficit(self, obj) -> int:
         # Need at least current weight and target weight to compute anything.
         if not obj.weight or not obj.aimed_weight:
             return 0
@@ -172,14 +189,15 @@ class TargetDetailSerializer(serializers.ModelSerializer):
             total_deficit = weight_delta * 7700
             daily_deficit = total_deficit / days_left
 
-            # Cap at ±750 kcal/day to keep recommendations medically safe
-            # (avoids crash diets or extreme bulks when the user picks an
-            # aggressive target date).
-            return round(max(min(daily_deficit, 750), -750))
+            # Cap at ±500 kcal/day — the standard, sustainable rate of ~0.5 kg
+            # per week. Keeps targets realistic instead of aggressive (a 750
+            # cap pushed calories down to the 1200 floor, making macro goals
+            # so small a single meal filled them).
+            return round(max(min(daily_deficit, 500), -500))
         except (ValueError, TypeError):
             return 0
     
-    def get_calorie_target(self, obj):
+    def get_calorie_target(self, obj) -> int:
         tdee = self.get_tdee(obj)
         daily_deficit = self.get_daily_deficit(obj)
         
@@ -192,7 +210,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         # Prevent negative targets (if someone sets unrealistic goals)
         return max(round(calorie_target), 1200) # 1200 is a safe minimum floor
     
-    def get_days_left(self, obj):
+    def get_days_left(self, obj) -> int:
         if obj.aimed_date:
             return max((obj.aimed_date - date.today()).days, 0)
         # Fallback: estimate days from weight delta at 0.5 kg/week.
@@ -213,7 +231,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
     #   Carbs:   remaining calories, divided by 4 kcal/g
     # Falls back to a 30/40/30 percentage split if weight is missing.
 
-    def get_protein_target(self, obj):
+    def get_protein_target(self, obj) -> int:
         calories = self.get_calorie_target(obj)
         if calories <= 0:
             return 0
@@ -238,14 +256,14 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         # fallback when weight is missing: 30% of calories
         return round(calories * 0.30 / 4)
 
-    def get_fat_target(self, obj):
+    def get_fat_target(self, obj) -> int:
         calories = self.get_calorie_target(obj)
         if calories <= 0:
             return 0
         # 30% of calories from fat, 9 kcal/g
         return round(calories * 0.30 / 9)
 
-    def get_carbs_target(self, obj):
+    def get_carbs_target(self, obj) -> int:
         calories = self.get_calorie_target(obj)
         if calories <= 0:
             return 0
@@ -255,7 +273,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         return max(round(remaining / 4), 0)
 
     # --- Micronutrient targets (RDA, gender-based where applicable) ---
-    def get_vitamin_targets(self, obj):
+    def get_vitamin_targets(self, obj) -> dict:
         is_male = obj.gender == 'male'
         return {
             'vitamin_a': 900 if is_male else 700,   # µg RAE
@@ -265,7 +283,7 @@ class TargetDetailSerializer(serializers.ModelSerializer):
             'vitamin_k': 120 if is_male else 90,    # µg
         }
 
-    def get_mineral_targets(self, obj):
+    def get_mineral_targets(self, obj) -> dict:
         is_male = obj.gender == 'male'
         return {
             'mineral_calcium': 1000,                # mg

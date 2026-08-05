@@ -1,6 +1,6 @@
 import base64
 import logging
-from django.utils.dateparse import parse_date
+import os
 from datetime import date, datetime, timedelta
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
@@ -16,16 +16,13 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
     , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer, WaterIntakePreferenceSerializer \
     , MealTypeListSerializer, WaterIntakeTypeSerializer, WaterIntakePreferenceGoalUpdateSerializer
-from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
 logger = logging.getLogger(__name__)
 
 # Constants
-CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
-CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab"
-SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
-GEMINI_API_KEY = "AIzaSyAs65_k_v0RGeTrS2lBe_Fb1JET6r_dHDU"
+SPOONACULAR_API_KEY = os.environ.get("SPOONACULAR_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # Meal type mapping
@@ -191,47 +188,6 @@ def extract_nutrition_data(nutrients):
         "vitaminE": nutrient_map.get("vitamin e", 0),
         "vitaminK": nutrient_map.get("vitamin k", 0),
     }
-
-
-def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "food-item-v1-recognition", app_id: str = "main"):
-    """
-    Predict food item from base64 encoded image using Clarifai API.
-    
-    Args:
-        base64_image: Base64 encoded image string
-        pat: Personal Access Token for Clarifai
-        model_id: Model ID to use
-        app_id: App ID
-        
-    Returns:
-        Prediction response JSON
-    """
-    url = f"https://api.clarifai.com/v2/models/{model_id}/outputs"
-
-    headers = {
-        "Authorization": f"Key {pat}",
-        "Content-Type": "application/json"
-    }
-
-    data = {
-        "user_app_id": {
-            "user_id": "clarifai",
-            "app_id": app_id
-        },
-        "inputs": [
-            {
-                "data": {
-                    "image": {
-                        "base64": base64_image
-                    }
-                }
-            }
-        ]
-    }
-
-    response = rq.post(url, headers=headers, json=data, timeout=30)
-    response.raise_for_status()
-    return response.json()
 
 
 class GeminiAPIError(Exception):
@@ -446,7 +402,7 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
     # Extract nutrition values using helper function
     nutrition_data = extract_nutrition_data(nutrients)
     nutrition_data["food_name"] = recipe.get("title", f"Recipe {recipe_id}")
-    
+
     return nutrition_data
 
 
@@ -477,6 +433,10 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
 )
 class FoodRecognitionView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'food_scan'
+
+    # Reject oversized uploads before reading them into memory / base64.
+    MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
 
     def post(self, request):
         serializer = FoodRecognitionRequestSerializer(data=request.data)
@@ -484,6 +444,12 @@ class FoodRecognitionView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         image_file = serializer.validated_data["image"]
+
+        if getattr(image_file, "size", 0) > self.MAX_IMAGE_BYTES:
+            return Response(
+                {"error": "Image is too large. Maximum size is 8 MB."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
 
         try:
             image_bytes = image_file.read()
@@ -524,19 +490,21 @@ class FoodRecognitionView(APIView):
             return Response(response_data, status=status.HTTP_201_CREATED)
 
         except (KeyError, ValueError) as e:
-            return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.warning("Food recognition data error: %s", e)
+            return Response({"error": "Could not process the recognition result."}, status=status.HTTP_502_BAD_GATEWAY)
         except GeminiAPIError as e:
-            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+            logger.error("Gemini API error: %s", e)
+            return Response({"error": "Food recognition service is unavailable. Try again."}, status=status.HTTP_502_BAD_GATEWAY)
         except (SpoonacularAPIError, SpoonacularDataError) as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except Exception as e:  # pylint: disable=broad-except
-            # It is good practice to log the specific error here for debugging
-            import traceback
-            error_details = traceback.format_exc()
-            return Response({
-                "error": str(e),
-                "details": error_details
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error("Spoonacular error: %s", e)
+            return Response({"error": "Nutrition lookup failed. Try again."}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:  # pylint: disable=broad-except
+            # Log the full traceback server-side; never leak internals to clients.
+            logger.exception("Unexpected error in FoodRecognitionView")
+            return Response(
+                {"error": "Something went wrong while processing the image."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 @extend_schema(
@@ -565,6 +533,7 @@ class FoodRecognitionView(APIView):
 )
 class AddRecipeView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'recipe_search'
 
     def post(self, request):
         serializer = AddRecipeRequestSerializer(data=request.data)
@@ -616,16 +585,17 @@ class AddRecipeView(APIView):
             return Response(response_data, status=status.HTTP_201_CREATED)
 
         except (KeyError, ValueError) as e:
-            return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.warning("Add-recipe data error: %s", e)
+            return Response({"error": "Could not process the recipe data."}, status=status.HTTP_502_BAD_GATEWAY)
         except (SpoonacularAPIError, SpoonacularDataError) as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except Exception as e:  # pylint: disable=broad-except
-            import traceback
-            error_details = traceback.format_exc()
-            return Response({
-                "error": str(e),
-                "details": error_details
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error("Spoonacular error: %s", e)
+            return Response({"error": "Nutrition lookup failed. Try again."}, status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("Unexpected error in AddRecipeView")
+            return Response(
+                {"error": "Something went wrong while adding the recipe."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 @extend_schema(
@@ -1048,12 +1018,12 @@ class RangeFoodStatsView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        start_date = parse_date(start_str)
-        end_date = parse_date(end_str)
-
-        if not start_date or not end_date:
+        try:
+            start_date = parse_date(start_str)
+            end_date = parse_date(end_str)
+        except ValueError:
             return Response(
-                {"error": "Invalid date format. Use YYYY-MM-DD."}, 
+                {"error": "Invalid date format. Use YYYY-MM-DD."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1205,6 +1175,7 @@ class SpoonacularRecipeSearchView(APIView):
     Proxies Spoonacular complexSearch with nutrition included.
     """
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'recipe_search'
 
     def get(self, request):
         query = request.query_params.get('query', '').strip()
@@ -1238,6 +1209,7 @@ class SpoonacularRecipeDetailView(APIView):
     Proxies Spoonacular recipe information (with nutrition).
     """
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'recipe_search'
 
     def get(self, request, recipe_id):
         try:
