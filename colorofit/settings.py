@@ -127,6 +127,9 @@ REST_FRAMEWORK = {
         'food_scan': '60/hour',      # Gemini image recognition (costly)
         'recipe_search': '120/hour',  # Spoonacular proxy (paid quota)
     },
+    # Consistent, localized error bodies (honors the Accept-Language header):
+    # {"error": "<message in caller's language>", "code": "<stable code>"}.
+    'EXCEPTION_HANDLER': 'colorofit.exception_handler.custom_exception_handler',
 }
 
 SPECTACULAR_SETTINGS = {
@@ -186,13 +189,29 @@ AUTH_PASSWORD_VALIDATORS = [
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=50),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    # A 1-day refresh window logged users out if they skipped a single day.
+    # 90 days is the consumer-app norm: the app stays signed in as long as it's
+    # opened at least every ~3 months. Access tokens still rotate every 50 min.
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=90),
 }
+
+# App version info served to the mobile app (Profile screen + future force-update
+# checks). Override via env without a code deploy.
+APP_VERSION = os.environ.get('APP_VERSION', '1.0.0')
+APP_MIN_SUPPORTED_VERSION = os.environ.get('APP_MIN_SUPPORTED_VERSION', '1.0.0')
+APP_FORCE_UPDATE = os.environ.get('APP_FORCE_UPDATE', 'false').lower() == 'true'
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
+
+# Languages the API can respond in (used by error-message localization).
+LANGUAGES = [
+    ('en', 'English'),
+    ('az', 'Azerbaijani'),
+    ('ru', 'Russian'),
+]
 
 TIME_ZONE = 'UTC'
 

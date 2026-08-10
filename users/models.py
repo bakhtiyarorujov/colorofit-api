@@ -42,8 +42,27 @@ class User(AbstractUser):
     alert_weekly_summary = models.BooleanField(default=True)
     alert_goal_achievements = models.BooleanField(default=True)
 
+    # True for anonymous "guest" accounts (no email yet). Cleared when the user
+    # upgrades by signing in with Google/Apple.
+    is_guest = models.BooleanField(default=False)
+
     def __str__(self):
         return self.username
+
+
+class GuestScanUsage(models.Model):
+    """Per-day AI food-scan counter for guest accounts, used to cap the (paid)
+    Gemini/Spoonacular calls a guest can trigger before being asked to sign in."""
+
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='guest_scan_usage')
+    date = models.DateField()
+    count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('user', 'date')
+
+    def __str__(self):
+        return f"{self.user_id} {self.date}: {self.count}"
 
 
 class Feedback(models.Model):

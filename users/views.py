@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 
 import requests as http_requests
 from rest_framework.views import APIView
@@ -13,6 +14,7 @@ from google.auth.transport import requests
 from django.contrib.auth import get_user_model
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse, OpenApiParameter
 from .utils import get_tokens_for_user
+from colorofit.i18n import error_payload
 from rest_framework.generics import UpdateAPIView, RetrieveAPIView, ListAPIView, RetrieveUpdateAPIView, CreateAPIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -20,6 +22,7 @@ from .serializers import GoogleTokenRequestSerializer, GoogleLoginResponseSerial
     , AppleLoginSerializer, AppleLoginResponseSerializer, UserAimDetailSerializer, TargetDetailSerializer \
     , UserProfileSerializer, AlertPreferenceSerializer, FeedbackSerializer, is_profile_complete
 from django.core.files.uploadedfile import InMemoryUploadedFile
+from .services.nutrition_ai import build_nutrition_advice
 User = get_user_model()
 
 
@@ -134,13 +137,53 @@ def verify_apple_identity_token(token: str) -> dict:
     summary="Google Sign-In",
     description="Authenticate or register a user via Google ID token and return JWT access and refresh tokens."
 )
+def _auth_payload(user):
+    """Login response body shared by Google/guest — same shape, plus
+    `profile_complete` and `is_guest`."""
+    return {
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+        },
+        "tokens": get_tokens_for_user(user),
+        "profile_complete": is_profile_complete(user),
+        "is_guest": bool(getattr(user, "is_guest", False)),
+    }
+
+
+def _resolve_google_user(request, email, first_name, last_name):
+    """Find-or-create the account for a Google login. If the request comes from
+    an in-progress guest and the email is free, upgrade that SAME guest account
+    (its data is preserved) instead of creating a new one."""
+    current = request.user if request.user.is_authenticated else None
+    existing = User.objects.filter(email=email).first()
+
+    if current is not None and getattr(current, "is_guest", False) and existing is None:
+        current.email = email
+        if not current.first_name:
+            current.first_name = first_name
+        if not current.last_name:
+            current.last_name = last_name
+        current.is_guest = False
+        current.save(update_fields=["email", "first_name", "last_name", "is_guest"])
+        return current
+
+    if existing is not None:
+        return existing
+    return User.objects.create(
+        username=email, email=email, first_name=first_name, last_name=last_name,
+    )
+
+
 class GoogleLoginAPIView(APIView):
     permission_classes = [AllowAny]
     def post(self, request):
         token_id = request.data.get("token")
 
         if not token_id:
-            return Response({"error": "Token is required"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(error_payload(request, "token_required"), status=status.HTTP_400_BAD_REQUEST)
 
         try:
             idinfo = id_token.verify_oauth2_token(
@@ -152,27 +195,11 @@ class GoogleLoginAPIView(APIView):
             first_name = idinfo.get('given_name', '')
             last_name = idinfo.get('family_name', '')
 
-            user, created = User.objects.get_or_create(email=email, defaults={
-                'username': email,
-                'first_name': first_name,
-                'last_name': last_name,
-            })
+            user = _resolve_google_user(request, email, first_name, last_name)
+            return Response(_auth_payload(user))
 
-            tokens = get_tokens_for_user(user)
-
-            return Response({
-                "user": {
-                    "id": user.id,
-                    "email": user.email,
-                    "first_name": user.first_name,
-                    "last_name": user.last_name,
-                },
-                "tokens": tokens,
-                "profile_complete": is_profile_complete(user),
-            })
-
-        except ValueError as e:
-            return Response({"error": "Invalid token", "details": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except ValueError:
+            return Response(error_payload(request, "invalid_token"), status=status.HTTP_400_BAD_REQUEST)
 
 
 @extend_schema(
@@ -237,20 +264,20 @@ class AppleLoginAPIView(APIView):
             # Verify the token's signature, issuer and audience against Apple's
             # public keys before trusting any claim.
             decoded = verify_apple_identity_token(token)
-        except (ExpiredSignatureError, JWTClaimsError, JWTError) as e:
+        except (ExpiredSignatureError, JWTClaimsError, JWTError):
             return Response(
-                {"error": "Invalid Apple token", "details": str(e)},
+                error_payload(request, "invalid_apple_token"),
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except http_requests.RequestException:
             return Response(
-                {"error": "Could not reach Apple to verify the token. Try again."},
+                error_payload(request, "apple_unreachable"),
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
         email = decoded.get('email')
         if not email:
-            return Response({"error": "Email not present in Apple token"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(error_payload(request, "email_missing_apple"), status=status.HTTP_400_BAD_REQUEST)
 
         user, created = User.objects.get_or_create(email=email, defaults={
             'username': email,
@@ -268,6 +295,25 @@ class AppleLoginAPIView(APIView):
         response_serializer = AppleLoginResponseSerializer(response_data)
         return Response(response_serializer.data)
         
+@extend_schema(
+    tags=["Authentication"],
+    summary="Guest sign-in",
+    description=(
+        "Creates an anonymous guest account and returns JWT tokens. The app "
+        "stores them and works normally; a later Google sign-in upgrades this "
+        "same account so guest data is preserved."
+    ),
+)
+class GuestLoginView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        user = User.objects.create(
+            username=f"guest_{uuid.uuid4().hex}", is_guest=True
+        )
+        return Response(_auth_payload(user), status=status.HTTP_201_CREATED)
+
+
 @extend_schema(
     tags=["User"]
 )
@@ -287,6 +333,35 @@ class TargetDetailView(RetrieveAPIView):
 
     def get_object(self):
         return self.request.user
+
+
+@extend_schema(
+    tags=["User"],
+    summary="AI-augmented nutrition plan",
+    description=(
+        "Returns the same deterministic targets as `target-details/` (the "
+        "formula stays the source of truth for calories) plus an `ai` block: "
+        "an intelligently rebalanced protein/fat/carb split and a short "
+        "personalised summary + tips generated by Claude. Falls back to the "
+        "formula's own macro split with a null summary when the AI layer is "
+        "unavailable. Pass `?lang=az|en|ru` to choose the advice language."
+    ),
+    parameters=[
+        OpenApiParameter(
+            name="lang", type=str, location=OpenApiParameter.QUERY, required=False,
+            description="Advice language: az, en, or ru (default en).",
+        ),
+    ],
+)
+class NutritionAdviceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        targets = TargetDetailSerializer(user).data
+        lang = request.query_params.get("lang", "en")
+        advice = build_nutrition_advice(user, targets, lang)
+        return Response({**targets, "ai": advice})
 
 
 @extend_schema(
@@ -335,4 +410,20 @@ class FeedbackCreateView(CreateAPIView):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+
+@extend_schema(
+    tags=["User"],
+    summary="Delete account",
+    description="Permanently deletes the authenticated user and all their data "
+                "(food logs, water intake, targets — cascaded). Required by the "
+                "Apple App Store and Google Play. Irreversible.",
+)
+class DeleteAccountView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        user = request.user
+        user.delete()  # FoodItem / WaterIntake FKs cascade
+        return Response(status=status.HTTP_204_NO_CONTENT)
 

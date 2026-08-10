@@ -20,11 +20,13 @@ from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from food.views import AppVersionView
 
 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('app-version/', AppVersionView.as_view(), name='app-version'),
     # YOUR PATTERNS
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     # Optional UI:
