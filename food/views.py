@@ -1,7 +1,8 @@
 import base64
 import logging
-from django.utils.dateparse import parse_date
+import os
 from datetime import date, datetime, timedelta
+from django.core.cache import cache
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 from django.db.models import Sum
@@ -16,15 +17,17 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from .serializers import FoodRecognitionRequestSerializer, FoodItemSerializer, FoodItemUpdateSerializer \
     , WaterIntakeSerializer, AddRecipeRequestSerializer, FoodStatsResponseSerializer, WaterIntakePreferenceSerializer \
     , MealTypeListSerializer, WaterIntakeTypeSerializer, WaterIntakePreferenceGoalUpdateSerializer
-from django.db.models import Sum
 from django.contrib.auth import get_user_model
+from colorofit.i18n import error_payload, translate, resolve_language
+from users.permissions import IsNotGuest
+from users.models import GuestScanUsage
 
 logger = logging.getLogger(__name__)
 
 # Constants
-CLARIFAI_MODEL_URL = "https://clarifai.com/clarifai/main/models/food-item-recognition"
-CLARIFAI_PAT = "c4b6fbbfd9384b92a35be2a0de5e97ab" 
-SPOONACULAR_API_KEY = "1a5198d38ce94b5ca46b6dc2f8e31cf3"
+SPOONACULAR_API_KEY = os.environ.get("SPOONACULAR_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # Meal type mapping
 MEAL_TYPE_MAPPING = {
@@ -191,45 +194,100 @@ def extract_nutrition_data(nutrients):
     }
 
 
-def predict_clarifai_by_base64(base64_image: str, pat: str, model_id: str = "food-item-v1-recognition", app_id: str = "main"):
-    """
-    Predict food item from base64 encoded image using Clarifai API.
-    
-    Args:
-        base64_image: Base64 encoded image string
-        pat: Personal Access Token for Clarifai
-        model_id: Model ID to use
-        app_id: App ID
-        
-    Returns:
-        Prediction response JSON
-    """
-    url = f"https://api.clarifai.com/v2/models/{model_id}/outputs"
+class GeminiAPIError(Exception):
+    """Custom exception for Gemini API errors"""
 
-    headers = {
-        "Authorization": f"Key {pat}",
-        "Content-Type": "application/json"
-    }
 
-    data = {
-        "user_app_id": {
-            "user_id": "clarifai",
-            "app_id": app_id
+def predict_food_with_gemini(base64_image: str, api_key: str = None):
+    """
+    Use Gemini multimodal model to recognize food and estimate nutrition in one call.
+    Returns dict matching extract_nutrition_data() output plus 'food_name'.
+    """
+    api_key = api_key or GEMINI_API_KEY
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={api_key}"
+    )
+
+    prompt = (
+        "You are a nutrition expert. Analyze the food in this image. "
+        "Identify the dish (including regional dishes like Azerbaijani plov, dolma, qutab if present). "
+        "Estimate the visible portion size in grams, then return realistic nutrition values "
+        "for that portion. All numeric values must be numbers (not strings). "
+        "If the image does not contain food, set food_name to an empty string and all numbers to 0."
+    )
+
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "food_name": {"type": "STRING"},
+            "estimated_grams": {"type": "NUMBER"},
+            "calories": {"type": "NUMBER"},
+            "protein": {"type": "NUMBER"},
+            "fat": {"type": "NUMBER"},
+            "saturated_fat": {"type": "NUMBER"},
+            "trans_fat": {"type": "NUMBER"},
+            "carbohydrates": {"type": "NUMBER"},
+            "fiber": {"type": "NUMBER"},
+            "sugar": {"type": "NUMBER"},
+            "cholesterol": {"type": "NUMBER"},
+            "sodium": {"type": "NUMBER"},
+            "calcium": {"type": "NUMBER"},
+            "iron": {"type": "NUMBER"},
+            "potassium": {"type": "NUMBER"},
+            "zinc": {"type": "NUMBER"},
+            "vitaminA": {"type": "NUMBER"},
+            "vitaminC": {"type": "NUMBER"},
+            "vitaminD": {"type": "NUMBER"},
+            "vitaminE": {"type": "NUMBER"},
+            "vitaminK": {"type": "NUMBER"},
         },
-        "inputs": [
-            {
-                "data": {
-                    "image": {
-                        "base64": base64_image
-                    }
-                }
-            }
-        ]
+        "required": ["food_name", "calories", "protein", "fat", "carbohydrates"],
     }
 
-    response = rq.post(url, headers=headers, json=data, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": prompt},
+                {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}},
+            ]
+        }],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "response_schema": response_schema,
+            "temperature": 0.2,
+        },
+    }
+
+    try:
+        response = rq.post(url, json=payload, timeout=45)
+    except rq.exceptions.RequestException as e:
+        raise GeminiAPIError(f"Gemini API request failed: {str(e)}") from e
+
+    if response.status_code != 200:
+        raise GeminiAPIError(
+            f"Gemini API error: {response.status_code} - {response.text[:300]}"
+        )
+
+    try:
+        data = response.json()
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        import json as _json
+        result = _json.loads(text)
+    except (ValueError, KeyError, IndexError) as e:
+        raise GeminiAPIError(f"Failed to parse Gemini response: {str(e)}") from e
+
+    # Normalize: ensure all expected keys exist with numeric defaults
+    keys_numeric = [
+        "calories", "protein", "fat", "saturated_fat", "trans_fat",
+        "carbohydrates", "fiber", "sugar", "cholesterol", "sodium",
+        "calcium", "iron", "potassium", "zinc",
+        "vitaminA", "vitaminC", "vitaminD", "vitaminE", "vitaminK",
+    ]
+    normalized = {k: float(result.get(k, 0) or 0) for k in keys_numeric}
+    normalized["food_name"] = (result.get("food_name") or "").strip()
+    normalized["estimated_grams"] = float(result.get("estimated_grams", 0) or 0)
+    return normalized
 
 
 class SpoonacularAPIError(Exception):
@@ -348,7 +406,7 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
     # Extract nutrition values using helper function
     nutrition_data = extract_nutrition_data(nutrients)
     nutrition_data["food_name"] = recipe.get("title", f"Recipe {recipe_id}")
-    
+
     return nutrition_data
 
 
@@ -379,29 +437,51 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
 )
 class FoodRecognitionView(APIView):
     permission_classes = [IsAuthenticated]
+    throttle_scope = 'food_scan'
+
+    # Reject oversized uploads before reading them into memory / base64.
+    MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
+    GUEST_DAILY_SCAN_LIMIT = 3
 
     def post(self, request):
+        # Guests get a small number of AI scans per day, then must sign in —
+        # each Gemini/Spoonacular call is a paid, abusable operation.
+        user = request.user
+        if getattr(user, 'is_guest', False):
+            usage, _ = GuestScanUsage.objects.get_or_create(user=user, date=date.today())
+            if usage.count >= self.GUEST_DAILY_SCAN_LIMIT:
+                return Response(
+                    {"error": "guest_scan_limit",
+                     "detail": "Sign in with Google to keep scanning."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            usage.count += 1
+            usage.save(update_fields=['count'])
+
         serializer = FoodRecognitionRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         image_file = serializer.validated_data["image"]
 
+        if getattr(image_file, "size", 0) > self.MAX_IMAGE_BYTES:
+            return Response(
+                error_payload(request, "image_too_large"),
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
         try:
             image_bytes = image_file.read()
             base64_image = base64.b64encode(image_bytes).decode("utf-8")
 
-            # Step 1: Predict food name
-            prediction = predict_clarifai_by_base64(base64_image, CLARIFAI_PAT)
-            concepts = prediction["outputs"][0]["data"]["concepts"]
+            # Recognize food + estimate nutrition in a single Gemini call.
+            nutrition_data = predict_food_with_gemini(base64_image)
 
-            if not concepts:
-                return Response({"error": "No prediction returned"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-            food_name = concepts[0]["name"]
-
-            # Step 2: Get nutrition data from Spoonacular
-            nutrition_data = get_spoonacular_data(food_name)
+            if not nutrition_data.get("food_name"):
+                return Response(
+                    error_payload(request, "no_food_detected"),
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
             # Step 3: Get meal_type if provided
             meal_type_id = serializer.validated_data.get("meal_type")
@@ -429,17 +509,21 @@ class FoodRecognitionView(APIView):
             return Response(response_data, status=status.HTTP_201_CREATED)
 
         except (KeyError, ValueError) as e:
-            return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.warning("Food recognition data error: %s", e)
+            return Response(error_payload(request, "recognition_failed"), status=status.HTTP_502_BAD_GATEWAY)
+        except GeminiAPIError as e:
+            logger.error("Gemini API error: %s", e)
+            return Response(error_payload(request, "recognition_unavailable"), status=status.HTTP_502_BAD_GATEWAY)
         except (SpoonacularAPIError, SpoonacularDataError) as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except Exception as e:  # pylint: disable=broad-except
-            # It is good practice to log the specific error here for debugging
-            import traceback
-            error_details = traceback.format_exc()
-            return Response({
-                "error": str(e),
-                "details": error_details
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error("Spoonacular error: %s", e)
+            return Response(error_payload(request, "nutrition_unavailable"), status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:  # pylint: disable=broad-except
+            # Log the full traceback server-side; never leak internals to clients.
+            logger.exception("Unexpected error in FoodRecognitionView")
+            return Response(
+                error_payload(request, "server_error"),
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 @extend_schema(
@@ -467,7 +551,8 @@ class FoodRecognitionView(APIView):
     description="Adds a recipe from Spoonacular by recipe ID to the user's food log. Optionally specify meal type."
 )
 class AddRecipeView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsNotGuest]
+    throttle_scope = 'recipe_search'
 
     def post(self, request):
         serializer = AddRecipeRequestSerializer(data=request.data)
@@ -519,16 +604,17 @@ class AddRecipeView(APIView):
             return Response(response_data, status=status.HTTP_201_CREATED)
 
         except (KeyError, ValueError) as e:
-            return Response({"error": f"Data processing error: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.warning("Add-recipe data error: %s", e)
+            return Response(error_payload(request, "recipe_processing_failed"), status=status.HTTP_502_BAD_GATEWAY)
         except (SpoonacularAPIError, SpoonacularDataError) as e:
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        except Exception as e:  # pylint: disable=broad-except
-            import traceback
-            error_details = traceback.format_exc()
-            return Response({
-                "error": str(e),
-                "details": error_details
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.error("Spoonacular error: %s", e)
+            return Response(error_payload(request, "nutrition_unavailable"), status=status.HTTP_502_BAD_GATEWAY)
+        except Exception:  # pylint: disable=broad-except
+            logger.exception("Unexpected error in AddRecipeView")
+            return Response(
+                error_payload(request, "server_error"),
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 @extend_schema(
@@ -637,7 +723,7 @@ class WaterIntakeCreateView(generics.CreateAPIView):
         # 3. If still no intake_type, raise an error
         if not intake_type:
             raise ValidationError(
-                {"intake_type": "No intake type provided and no user preference set."}
+                {"intake_type": translate(self.request, "intake_type_required")}
             )
 
         serializer.save(user=user, intake_type=intake_type)
@@ -694,22 +780,38 @@ class WaterIntakeDailyTotalView(APIView):
         else:
             target_date = date.today()
 
-        # 2. Filter by user and date, then aggregate the sum of the related type's amount
-        aggregation = WaterIntake.objects.filter(  # pylint: disable=no-member
-            user=request.user, 
+        # 2. Filter by user and date, get logs and aggregate
+        logs_qs = WaterIntake.objects.filter(  # pylint: disable=no-member
+            user=request.user,
             date=target_date
-        ).aggregate(total_ml=Sum('intake_type__amount_ml'))
+        ).select_related('intake_type').order_by('-id')
 
-        # 3. Handle the result (result is None if no records exist)
+        aggregation = logs_qs.aggregate(total_ml=Sum('intake_type__amount_ml'))
         total_ml = aggregation['total_ml'] or 0
-        
-        # 4. Convert to Liters
         total_liters = total_ml / 1000
 
-        # 5. Return formatted response (2 decimal places)
+        # 3. Get user goal (ml) — default to 2000 if not set
+        goal_ml = request.user.water_intake_goal_ml or 2000
+        progress = min(round((total_ml / goal_ml) * 100, 2), 100) if goal_ml else 0
+
+        # 4. Serialize today's logs so client can show/delete them
+        logs = [
+            {
+                "id": log.id,
+                "intake_type_id": log.intake_type_id,
+                "intake_type_name": log.intake_type.name if log.intake_type else None,
+                "amount_ml": log.intake_type.amount_ml if log.intake_type else 0,
+            }
+            for log in logs_qs
+        ]
+
         return Response({
             "date": str(target_date),
-            "total_liters": f"{total_liters:.2f}"
+            "total_ml": total_ml,
+            "total_liters": f"{total_liters:.2f}",
+            "water_intake_goal_ml": goal_ml,
+            "progress_percent": progress,
+            "logs": logs,
         })
 
 @extend_schema(
@@ -835,27 +937,52 @@ class WeeklyFoodStatsView(APIView):
         # Find the start of the week (Monday)
         # weekday() returns 0 for Monday, 6 for Sunday
         start_of_week = today - timedelta(days=today.weekday())
-        
+        end_of_week = start_of_week + timedelta(days=6)
+
         # Aggregate data between start_of_week and today
         stats = FoodItem.objects.filter(
             user=request.user,
             date__date__range=[start_of_week, today]
         ).aggregate(
             cal=Sum('calories'), pro=Sum('protein'), carb=Sum('carbohydrates'), fat=Sum('fats'),
-            v_a=Sum('vitamin_a'), v_c=Sum('vitamin_c'), v_d=Sum('vitamin_d'), 
+            v_a=Sum('vitamin_a'), v_c=Sum('vitamin_c'), v_d=Sum('vitamin_d'),
             v_e=Sum('vitamin_e'), v_k=Sum('vitamin_k'),
-            m_ca=Sum('mineral_calcium'), m_fe=Sum('mineral_iron'), 
+            m_ca=Sum('mineral_calcium'), m_fe=Sum('mineral_iron'),
             m_na=Sum('mineral_sodium'), m_k=Sum('mineral_potassium'), m_zn=Sum('mineral_zink')
         )
 
+        # Per-day breakdown (Mon..Sun)
+        day_labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        days_payload = []
+        for i in range(7):
+            current = start_of_week + timedelta(days=i)
+            day_stats = FoodItem.objects.filter(
+                user=request.user,
+                date__date=current
+            ).aggregate(
+                cal=Sum('calories'),
+                pro=Sum('protein'),
+                carb=Sum('carbohydrates'),
+                fat=Sum('fats'),
+            )
+            days_payload.append({
+                "date": current.isoformat(),
+                "day_label": day_labels[i],
+                "calories": float(day_stats['cal'] or 0),
+                "protein": float(day_stats['pro'] or 0),
+                "carbohydrates": float(day_stats['carb'] or 0),
+                "fats": float(day_stats['fat'] or 0),
+            })
+
         return Response({
-            "week_range": f"{start_of_week} to {today}",
+            "week_range": f"{start_of_week} to {end_of_week}",
             "overall": {
                 "calories": stats['cal'] or 0,
                 "protein": stats['pro'] or 0,
                 "carbohydrates": stats['carb'] or 0,
                 "fats": stats['fat'] or 0
             },
+            "days": days_payload,
             "vitamins": {
                 "vitamin_a": stats['v_a'] or 0,
                 "vitamin_c": stats['v_c'] or 0,
@@ -906,22 +1033,22 @@ class RangeFoodStatsView(APIView):
         # 2. Validate parameters
         if not start_str or not end_str:
             return Response(
-                {"error": "Both start_date and end_date are required."}, 
+                error_payload(request, "date_range_required"),
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        start_date = parse_date(start_str)
-        end_date = parse_date(end_str)
-
-        if not start_date or not end_date:
+        try:
+            start_date = parse_date(start_str)
+            end_date = parse_date(end_str)
+        except ValueError:
             return Response(
-                {"error": "Invalid date format. Use YYYY-MM-DD."}, 
+                error_payload(request, "invalid_date_format"),
                 status=status.HTTP_400_BAD_REQUEST
             )
 
         if start_date > end_date:
             return Response(
-                {"error": "start_date cannot be after end_date."}, 
+                error_payload(request, "start_after_end"),
                 status=status.HTTP_400_BAD_REQUEST
             )
 
@@ -1056,3 +1183,289 @@ class WaterIntakeGoalPreferenceUpdateView(generics.UpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+# ---------------------------------------------------------------------------
+# Spoonacular proxy (keeps the API key server-side, off the mobile binary)
+# ---------------------------------------------------------------------------
+
+class SpoonacularRecipeSearchView(APIView):
+    """
+    GET /food/recipes/search/?query=<term>&number=<n>
+    Proxies Spoonacular complexSearch with nutrition included.
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'recipe_search'
+
+    def get(self, request):
+        query = request.query_params.get('query', '').strip()
+        number = request.query_params.get('number', '50')
+        # Optional filters (forwarded to Spoonacular complexSearch). Browsing by
+        # category alone is valid, so a query is only required when no filter is set.
+        meal_type = request.query_params.get('type', '').strip()
+        cuisine = request.query_params.get('cuisine', '').strip()
+        diet = request.query_params.get('diet', '').strip()
+        sort = request.query_params.get('sort', '').strip()
+
+        sort = sort or 'popularity'
+        # Cache identical searches. Spoonacular's free plan is a shared 150
+        # points/day budget across ALL users, so without this a few users
+        # browsing would exhaust it. Recipe results barely change, so a 12h TTL
+        # is safe and cuts upstream calls (and cost) dramatically.
+        cache_key = f'spoon_search:{query}|{number}|{meal_type}|{cuisine}|{diet}|{sort}'
+        data = cache.get(cache_key)
+
+        # No query/filter is allowed — complexSearch then returns popular recipes,
+        # which powers the "All" category browse.
+        if data is None:
+            try:
+                params = {
+                    'number': number,
+                    'addRecipeNutrition': 'true',
+                    'apiKey': SPOONACULAR_API_KEY,
+                    'sort': sort,
+                }
+                if query:
+                    params['query'] = query
+                if meal_type:
+                    params['type'] = meal_type
+                if cuisine:
+                    params['cuisine'] = cuisine
+                if diet:
+                    params['diet'] = diet
+
+                resp = rq.get(
+                    'https://api.spoonacular.com/recipes/complexSearch',
+                    params=params,
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.warning('Spoonacular search error %s: %s', resp.status_code, resp.text[:200])
+                    return Response({'detail': 'Upstream error', 'status': resp.status_code},
+                                    status=status.HTTP_502_BAD_GATEWAY)
+                data = resp.json()
+                cache.set(cache_key, data, 60 * 60 * 12)  # 12 hours (shared English base)
+            except rq.RequestException as e:
+                logger.exception('Spoonacular search exception: %s', e)
+                return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        # Localize result titles to the caller's language (Accept-Language, or an
+        # explicit ?lang override). Spoonacular is English-only, so titles are
+        # batch-translated once per (search, language) and cached 12h.
+        lang = (request.query_params.get('lang') or resolve_language(request)).strip().lower()
+        if lang in RECIPE_TRANSLATE_LANGS and GEMINI_API_KEY:
+            tr_key = f'{cache_key}|tr:{lang}'
+            translated = cache.get(tr_key)
+            if translated is None:
+                translated = _translate_search_results(data, RECIPE_TRANSLATE_LANGS[lang])
+                cache.set(tr_key, translated, 60 * 60 * 12)
+            data = translated
+
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class SpoonacularRecipeDetailView(APIView):
+    """
+    GET /food/recipes/<int:recipe_id>/
+    Proxies Spoonacular recipe information (with nutrition).
+    """
+    permission_classes = [IsAuthenticated]
+    throttle_scope = 'recipe_search'
+
+    def get(self, request, recipe_id):
+        # A recipe's details are effectively immutable — cache 24h to spare quota.
+        cache_key = f'spoon_detail:{recipe_id}'
+        data = cache.get(cache_key)
+        if data is None:
+            try:
+                resp = rq.get(
+                    f'https://api.spoonacular.com/recipes/{recipe_id}/information',
+                    params={
+                        'apiKey': SPOONACULAR_API_KEY,
+                        'includeNutrition': 'true',
+                    },
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    logger.warning('Spoonacular detail error %s: %s', resp.status_code, resp.text[:200])
+                    return Response({'detail': 'Upstream error', 'status': resp.status_code},
+                                    status=status.HTTP_502_BAD_GATEWAY)
+                data = resp.json()
+                cache.set(cache_key, data, 60 * 60 * 24)  # 24 hours
+            except rq.RequestException as e:
+                logger.exception('Spoonacular detail exception: %s', e)
+                return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
+
+        # Optional translation of title/ingredients/steps. Done once per
+        # (recipe, language) and cached ~30 days — so each recipe hits Gemini at
+        # most once per language, keeping cost/latency tiny.
+        lang = (request.query_params.get('lang') or resolve_language(request)).strip().lower()
+        if lang in RECIPE_TRANSLATE_LANGS and GEMINI_API_KEY:
+            tr_key = f'recipe_tr:{recipe_id}:{lang}'
+            translated = cache.get(tr_key)
+            if translated is None:
+                translated = _translate_recipe(data, RECIPE_TRANSLATE_LANGS[lang])
+                cache.set(tr_key, translated, 60 * 60 * 24 * 30)  # 30 days
+            data = translated
+
+        return Response(data, status=status.HTTP_200_OK)
+
+
+# ---------------------------------------------------------------------------
+# Recipe translation (title + ingredients + steps) via Gemini, on demand.
+# Spoonacular only serves English, so we batch-translate a recipe's strings in a
+# single Gemini call and the caller caches the result per (recipe, language).
+# ---------------------------------------------------------------------------
+
+RECIPE_TRANSLATE_LANGS = {'az': 'Azerbaijani', 'ru': 'Russian'}
+
+
+def _gemini_translate_batch(strings, language):
+    """Translate a list of strings to `language`; returns a same-length list.
+    Falls back to the originals on any error (fail-open)."""
+    if not strings:
+        return strings
+    try:
+        import json as _json
+        prompt = (
+            f"Translate each string in this JSON array to {language}. "
+            "The strings are cooking recipe titles, ingredient lines and steps. "
+            "Return ONLY a JSON array of strings, same length and order, "
+            "translations only, no notes.\n\n" + _json.dumps(strings, ensure_ascii=False)
+        )
+        resp = rq.post(
+            f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent',
+            params={'key': GEMINI_API_KEY},
+            json={
+                'contents': [{'parts': [{'text': prompt}]}],
+                'generationConfig': {'responseMimeType': 'application/json'},
+            },
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            logger.warning('Gemini translate error %s: %s', resp.status_code, resp.text[:200])
+            return strings
+        text = resp.json()['candidates'][0]['content']['parts'][0]['text']
+        out = _json.loads(text)
+        if isinstance(out, list) and len(out) == len(strings):
+            return [str(x) for x in out]
+        return strings
+    except Exception as e:  # noqa: BLE001 — never fail the request over translation
+        logger.warning('Gemini translate exception: %s', e)
+        return strings
+
+
+def _translate_recipe(data, language):
+    """Return a copy of the Spoonacular recipe dict with title, ingredient
+    `original` lines and instruction `step` texts translated to `language`."""
+    import copy
+    out = copy.deepcopy(data)
+
+    strings = []
+    slots = []  # (kind, index/None, subindex/None) to map translations back
+
+    if out.get('title'):
+        slots.append(('title', None, None))
+        strings.append(str(out['title']))
+
+    ings = out.get('extendedIngredients') or []
+    for i, ing in enumerate(ings):
+        if isinstance(ing, dict) and ing.get('original'):
+            slots.append(('ing', i, None))
+            strings.append(str(ing['original']))
+
+    blocks = out.get('analyzedInstructions') or []
+    for bi, blk in enumerate(blocks):
+        steps = (blk.get('steps') if isinstance(blk, dict) else None) or []
+        for si, step in enumerate(steps):
+            if isinstance(step, dict) and step.get('step'):
+                slots.append(('step', bi, si))
+                strings.append(str(step['step']))
+
+    if not strings:
+        return out
+
+    translations = _gemini_translate_batch(strings, language)
+
+    for slot, value in zip(slots, translations):
+        kind, i, si = slot
+        if kind == 'title':
+            out['title'] = value
+        elif kind == 'ing':
+            out['extendedIngredients'][i]['original'] = value
+        elif kind == 'step':
+            out['analyzedInstructions'][i]['steps'][si]['step'] = value
+
+    return out
+
+
+def _translate_search_results(data, language):
+    """Return a copy of a complexSearch response with each result's `title`
+    translated to `language`. Only titles are shown in the list, so we batch
+    just those in a single Gemini call (fail-open: originals on any error)."""
+    import copy
+    out = copy.deepcopy(data)
+    results = out.get('results')
+    if not isinstance(results, list) or not results:
+        return out
+
+    indexes = [i for i, r in enumerate(results)
+               if isinstance(r, dict) and r.get('title')]
+    if not indexes:
+        return out
+
+    titles = [str(results[i]['title']) for i in indexes]
+    translations = _gemini_translate_batch(titles, language)
+    for i, value in zip(indexes, translations):
+        results[i]['title'] = value
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Recipe categories (served from the backend so the app can change the chip
+# set without an app-store update). `type` maps to Spoonacular's meal type;
+# a null `type` means "All" (no filter). `icon` is a key the app maps locally.
+# ---------------------------------------------------------------------------
+
+RECIPE_CATEGORIES = [
+    {"key": "all", "label": "All", "type": None, "icon": "all"},
+    {"key": "breakfast", "label": "Breakfast", "type": "breakfast", "icon": "breakfast"},
+    {"key": "main", "label": "Main", "type": "main course", "icon": "main"},
+    {"key": "salad", "label": "Salad", "type": "salad", "icon": "salad"},
+    {"key": "soup", "label": "Soup", "type": "soup", "icon": "soup"},
+    {"key": "snack", "label": "Snack", "type": "snack", "icon": "snack"},
+    {"key": "dessert", "label": "Dessert", "type": "dessert", "icon": "dessert"},
+    {"key": "drinks", "label": "Drinks", "type": "beverage", "icon": "drinks"},
+    {"key": "bread", "label": "Bread", "type": "bread", "icon": "bread"},
+    {"key": "appetizer", "label": "Appetizer", "type": "appetizer", "icon": "appetizer"},
+]
+
+
+class AppVersionView(APIView):
+    """
+    GET /app-version/
+    Returns the current app version + minimum supported version (for future
+    force-update prompts). Public config — no auth required.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.conf import settings as dj_settings
+        return Response({
+            'version': dj_settings.APP_VERSION,
+            'min_supported': dj_settings.APP_MIN_SUPPORTED_VERSION,
+            'force_update': dj_settings.APP_FORCE_UPDATE,
+        }, status=status.HTTP_200_OK)
+
+
+class RecipeCategoriesView(APIView):
+    """
+    GET /food/recipes/categories/
+    Returns the meal-type category chips shown on the recipes page.
+    Public config data — no auth required so chips render even before the
+    token is ready.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({"categories": RECIPE_CATEGORIES}, status=status.HTTP_200_OK)

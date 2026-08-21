@@ -14,15 +14,21 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from food.views import AppVersionView
+from colorofit.legal_views import privacy_policy
 
 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('app-version/', AppVersionView.as_view(), name='app-version'),
+    path('privacy/', privacy_policy, name='privacy-policy'),
     # YOUR PATTERNS
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     # Optional UI:
@@ -34,3 +40,7 @@ urlpatterns = [
     path('user/', include('users.urls')),
     path('food/', include('food.urls')),
 ]
+
+# Serve user-uploaded media (e.g. profile pictures) during development.
+# On PythonAnywhere, add a static-files mapping: URL /media/ -> MEDIA_ROOT.
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

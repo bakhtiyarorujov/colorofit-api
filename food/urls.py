@@ -2,9 +2,13 @@ from django.urls import path
 from .views import FoodRecognitionView, FoodItemByDateView, FoodItemUpdateView, FoodItemDeleteView \
     , WaterIntakeCreateView, WaterIntakeDeleteView, WaterIntakeDailyTotalView, AddRecipeView \
     , DailyStatsView, WeeklyFoodStatsView, RangeFoodStatsView, WaterIntakeTypeListView, SetWaterIntakePreferenceView \
-    , MealTypeListView, WaterIntakeGoalPreferenceUpdateView
+    , MealTypeListView, WaterIntakeGoalPreferenceUpdateView, SpoonacularRecipeSearchView, SpoonacularRecipeDetailView \
+    , RecipeCategoriesView
 
 urlpatterns = [
+    path("recipes/categories/", RecipeCategoriesView.as_view(), name="recipes-categories"),
+    path("recipes/search/", SpoonacularRecipeSearchView.as_view(), name="recipes-search"),
+    path("recipes/<int:recipe_id>/", SpoonacularRecipeDetailView.as_view(), name="recipes-detail"),
     path("predict-food/", FoodRecognitionView.as_view(), name="predict-food"),
     path("add-recipe/", AddRecipeView.as_view(), name="add-recipe"),
     path("history/", FoodItemByDateView.as_view(), name="food-history"),

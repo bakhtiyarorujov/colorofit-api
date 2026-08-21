@@ -12,22 +12,49 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+import sys
 from datetime import timedelta
+
+from dotenv import load_dotenv
+
+# True while running the Django test suite (`manage.py test`).
+TESTING = 'test' in sys.argv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from a .env file (local dev + production on
+# PythonAnywhere). Real secrets live only in .env, which is git-ignored.
+load_dotenv(BASE_DIR / '.env')
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-&1*x!dd5m#)**p^%4o&=#y6$$o6k1=#uo$wy228=-=(!b4xng0'
+# Must be provided via the environment in production. The insecure fallback is
+# only used for local development when DJANGO_SECRET_KEY is unset.
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-&1*x!dd5m#)**p^%4o&=#y6$$o6k1=#uo$wy228=-=(!b4xng0',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Defaults to False (production-safe); set DJANGO_DEBUG=True in .env for local dev.
+DEBUG = env_bool('DJANGO_DEBUG', False)
 
-ALLOWED_HOSTS = ['*']
+# Comma-separated list of allowed hosts, e.g.
+# "colorofit.pythonanywhere.com,localhost,127.0.0.1"
+ALLOWED_HOSTS = [
+    h.strip() for h in os.environ.get(
+        'DJANGO_ALLOWED_HOSTS',
+        'colorofit.pythonanywhere.com,localhost,127.0.0.1',
+    ).split(',') if h.strip()
+]
 
 
 # Application definition
@@ -77,15 +104,32 @@ TEMPLATES = [
 WSGI_APPLICATION = 'colorofit.wsgi.application'
 
 REST_FRAMEWORK = {
-    # Use Django's standard `django.contrib.auth` permissions,
-    # or allow read-only access for unauthenticated users.
+    # This is an authenticated API: require auth by default and let the few
+    # public endpoints (social login, water-intake types) opt out explicitly.
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.DjangoModelPermissionsOrAnonReadOnly'
+        'rest_framework.permissions.IsAuthenticated'
     ],
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
-    )
+    ),
+    # Throttling protects the paid AI / recipe endpoints (Gemini, Spoonacular)
+    # from being drained by a single account. `scoped` rates are applied
+    # per-view via `throttle_scope`.
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.UserRateThrottle',
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.ScopedRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'user': '1000/day',
+        'anon': '60/hour',
+        'food_scan': '60/hour',      # Gemini image recognition (costly)
+        'recipe_search': '120/hour',  # Spoonacular proxy (paid quota)
+    },
+    # Consistent, localized error bodies (honors the Accept-Language header):
+    # {"error": "<message in caller's language>", "code": "<stable code>"}.
+    'EXCEPTION_HANDLER': 'colorofit.exception_handler.custom_exception_handler',
 }
 
 SPECTACULAR_SETTINGS = {
@@ -101,12 +145,28 @@ SPECTACULAR_SETTINGS = {
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+# Defaults to SQLite for local dev. In production set DB_ENGINE (e.g.
+# 'django.db.backends.mysql') + DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT
+# in .env to point at a managed database (PythonAnywhere MySQL).
+if os.environ.get('DB_ENGINE'):
+    DATABASES = {
+        'default': {
+            'ENGINE': os.environ['DB_ENGINE'],
+            'NAME': os.environ.get('DB_NAME', ''),
+            'USER': os.environ.get('DB_USER', ''),
+            'PASSWORD': os.environ.get('DB_PASSWORD', ''),
+            'HOST': os.environ.get('DB_HOST', ''),
+            'PORT': os.environ.get('DB_PORT', ''),
+            'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -129,13 +189,29 @@ AUTH_PASSWORD_VALIDATORS = [
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=50),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
+    # A 1-day refresh window logged users out if they skipped a single day.
+    # 90 days is the consumer-app norm: the app stays signed in as long as it's
+    # opened at least every ~3 months. Access tokens still rotate every 50 min.
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=90),
 }
+
+# App version info served to the mobile app (Profile screen + future force-update
+# checks). Override via env without a code deploy.
+APP_VERSION = os.environ.get('APP_VERSION', '1.0.0')
+APP_MIN_SUPPORTED_VERSION = os.environ.get('APP_MIN_SUPPORTED_VERSION', '1.0.0')
+APP_FORCE_UPDATE = os.environ.get('APP_FORCE_UPDATE', 'false').lower() == 'true'
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
 LANGUAGE_CODE = 'en-us'
+
+# Languages the API can respond in (used by error-message localization).
+LANGUAGES = [
+    ('en', 'English'),
+    ('az', 'Azerbaijani'),
+    ('ru', 'Russian'),
+]
 
 TIME_ZONE = 'UTC'
 
@@ -155,11 +231,49 @@ if DEBUG:
 else:
     STATIC_ROOT = os.path.join(BASE_DIR, "static")
 
-MEDIA_URL = 'media/'
+MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+
+# Production security hardening (only enforced when DEBUG is off, so local
+# development over http keeps working).
+if not DEBUG:
+    # PythonAnywhere terminates TLS and forwards this header on https requests.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    # Off under the test runner so the http test client isn't 301-redirected.
+    SECURE_SSL_REDIRECT = env_bool('DJANGO_SECURE_SSL_REDIRECT', True) and not TESTING
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    SECURE_HSTS_SECONDS = 31536000  # 1 year
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    X_FRAME_OPTIONS = 'DENY'
+
+# Trust the deployed origin(s) for CSRF (Django 4+ requires scheme).
+CSRF_TRUSTED_ORIGINS = [
+    o.strip() for o in os.environ.get(
+        'DJANGO_CSRF_TRUSTED_ORIGINS',
+        'https://colorofit.pythonanywhere.com',
+    ).split(',') if o.strip()
+]
+
+# Log to stderr so tracebacks land in the PythonAnywhere error log instead of
+# being returned to API clients.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler'},
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': os.environ.get('DJANGO_LOG_LEVEL', 'INFO'),
+    },
+}
 

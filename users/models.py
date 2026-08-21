@@ -35,6 +35,48 @@ class User(AbstractUser):
     life_style = models.CharField(max_length=20, choices=LifeStyle_CHOICES, blank=True, null=True)
     water_intake_goal_ml = models.PositiveIntegerField(default=2000)  # in milliliters
     water_intake_type_preference = models.ForeignKey(WaterIntakeType, on_delete=models.SET_NULL, blank=True, null=True)
-    
+
+    # Notification preferences (toggles synced from the Alerts page).
+    alert_meal_reminders = models.BooleanField(default=True)
+    alert_water_reminders = models.BooleanField(default=True)
+    alert_weekly_summary = models.BooleanField(default=True)
+    alert_goal_achievements = models.BooleanField(default=True)
+
+    # True for anonymous "guest" accounts (no email yet). Cleared when the user
+    # upgrades by signing in with Google/Apple.
+    is_guest = models.BooleanField(default=False)
+
     def __str__(self):
         return self.username
+
+
+class GuestScanUsage(models.Model):
+    """Per-day AI food-scan counter for guest accounts, used to cap the (paid)
+    Gemini/Spoonacular calls a guest can trigger before being asked to sign in."""
+
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='guest_scan_usage')
+    date = models.DateField()
+    count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = ('user', 'date')
+
+    def __str__(self):
+        return f"{self.user_id} {self.date}: {self.count}"
+
+
+class Feedback(models.Model):
+    """User-submitted feedback (rating + free-form message)."""
+    user = models.ForeignKey(
+        'User', on_delete=models.CASCADE, related_name='feedback_entries',
+        blank=True, null=True,
+    )
+    rating = models.PositiveSmallIntegerField(default=0)  # 0-5
+    message = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ('-created_at',)
+
+    def __str__(self):
+        return f"Feedback({self.rating}★) by {self.user_id}"

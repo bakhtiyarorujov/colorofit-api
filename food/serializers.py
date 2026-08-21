@@ -108,7 +108,7 @@ class WaterIntakeUnitSerializer(serializers.ModelSerializer):
 class WaterIntakeTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = WaterIntakeType
-        fields = ['id', 'name']
+        fields = ['id', 'name', 'amount_ml']
 
 
 class WaterIntakePreferenceSerializer(serializers.Serializer):
@@ -121,6 +121,8 @@ class WaterIntakePreferenceSerializer(serializers.Serializer):
         fields = ['water_intake_type_id']
 
 class WaterIntakePreferenceGoalUpdateSerializer(serializers.ModelSerializer):
+    water_intake_goal_ml = serializers.IntegerField(min_value=500, max_value=10000)
+
     class Meta:
         model = User
         fields = [

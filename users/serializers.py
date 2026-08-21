@@ -1,6 +1,18 @@
 from rest_framework import serializers
-from .models import User
+from .models import User, Feedback
 from datetime import date
+
+
+def is_profile_complete(user):
+    """True when the user has finished onboarding (has the core body metrics),
+    so the app can skip onboarding on a returning login."""
+    return bool(
+        user.gender
+        and user.age
+        and user.height
+        and user.weight
+        and user.life_style
+    )
 
 
 # Request Serializer
@@ -29,6 +41,11 @@ class AppleLoginSerializer(serializers.Serializer):
 class AppleLoginResponseSerializer(serializers.Serializer):
     user = UserSerializer()
     tokens = serializers.DictField(child=serializers.CharField())
+    profile_complete = serializers.SerializerMethodField()
+
+    def get_profile_complete(self, obj) -> bool:
+        user = obj['user'] if isinstance(obj, dict) else obj.user
+        return is_profile_complete(user)
 
 
 class UserAimDetailSerializer(serializers.ModelSerializer):
@@ -44,11 +61,72 @@ class UserAimDetailSerializer(serializers.ModelSerializer):
             'life_style',
         )
 
+
+class UserProfileSerializer(serializers.ModelSerializer):
+    """Full profile read/update. Read returns all relevant fields; write
+    accepts a subset (name, bio, profile_picture, body metrics)."""
+    full_name = serializers.SerializerMethodField()
+    profile_picture = serializers.ImageField(required=False, allow_null=True)
+
+    class Meta:
+        model = User
+        fields = (
+            'id',
+            'email',
+            'username',
+            'first_name',
+            'last_name',
+            'full_name',
+            'profile_picture',
+            'bio',
+            'gender',
+            'age',
+            'height',
+            'weight',
+            'aimed_weight',
+            'aimed_date',
+            'life_style',
+            'water_intake_goal_ml',
+        )
+        read_only_fields = ('id', 'email', 'username', 'full_name')
+
+    def get_full_name(self, obj) -> str:
+        name = f"{obj.first_name or ''} {obj.last_name or ''}".strip()
+        return name or (obj.username or '').split('@')[0]
+
+
+class AlertPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = (
+            'alert_meal_reminders',
+            'alert_water_reminders',
+            'alert_weekly_summary',
+            'alert_goal_achievements',
+        )
+
+
+class FeedbackSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Feedback
+        fields = ('id', 'rating', 'message', 'created_at')
+        read_only_fields = ('id', 'created_at')
+
+    def validate_rating(self, value):
+        if value < 0 or value > 5:
+            raise serializers.ValidationError('rating must be 0..5')
+        return value
+
 class TargetDetailSerializer(serializers.ModelSerializer):
     tdee = serializers.SerializerMethodField()
     daily_deficit = serializers.SerializerMethodField()
     calorie_target = serializers.SerializerMethodField()
     days_left = serializers.SerializerMethodField()
+    protein_target = serializers.SerializerMethodField()
+    carbs_target = serializers.SerializerMethodField()
+    fat_target = serializers.SerializerMethodField()
+    vitamin_targets = serializers.SerializerMethodField()
+    mineral_targets = serializers.SerializerMethodField()
 
     class Meta:
         model = User
@@ -56,10 +134,15 @@ class TargetDetailSerializer(serializers.ModelSerializer):
             'tdee',
             'daily_deficit',
             'calorie_target',
-            'days_left'
+            'days_left',
+            'protein_target',
+            'carbs_target',
+            'fat_target',
+            'vitamin_targets',
+            'mineral_targets',
         )
 
-    def get_tdee(self, obj):
+    def get_tdee(self, obj) -> int:
         # Safety Check: If any required field is missing, return 0
         if not all([obj.weight, obj.height, obj.age, obj.gender]):
             return 0
@@ -84,23 +167,37 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         tdee = bmr * activity_factor
         return round(tdee)
     
-    def get_daily_deficit(self, obj):
-        # Safety Check
-        if not all([obj.weight, obj.aimed_weight, obj.aimed_date]):
+    def get_daily_deficit(self, obj) -> int:
+        # Need at least current weight and target weight to compute anything.
+        if not obj.weight or not obj.aimed_weight:
             return 0
 
         try:
-            weight_loss_goal = float(obj.weight) - float(obj.aimed_weight)
-            # Ensure days_left isn't negative or zero to prevent weird math
-            days_left = max((obj.aimed_date - date.today()).days, 1)  
-            
-            total_deficit = weight_loss_goal * 7700
+            # weight_delta > 0 means cutting (lose weight),
+            # weight_delta < 0 means bulking (gain weight).
+            weight_delta = float(obj.weight) - float(obj.aimed_weight)
+            if weight_delta == 0:
+                return 0
+
+            # If user picked a target date, honor it. Otherwise pace at a
+            # healthy 0.5 kg/week (~1 lb/week) — standard fitness app default.
+            if obj.aimed_date:
+                days_left = max((obj.aimed_date - date.today()).days, 1)
+            else:
+                days_left = max(int(abs(weight_delta) / 0.5 * 7), 7)
+
+            total_deficit = weight_delta * 7700
             daily_deficit = total_deficit / days_left
-            return round(daily_deficit)
+
+            # Cap at ±500 kcal/day — the standard, sustainable rate of ~0.5 kg
+            # per week. Keeps targets realistic instead of aggressive (a 750
+            # cap pushed calories down to the 1200 floor, making macro goals
+            # so small a single meal filled them).
+            return round(max(min(daily_deficit, 500), -500))
         except (ValueError, TypeError):
             return 0
     
-    def get_calorie_target(self, obj):
+    def get_calorie_target(self, obj) -> int:
         tdee = self.get_tdee(obj)
         daily_deficit = self.get_daily_deficit(obj)
         
@@ -113,9 +210,87 @@ class TargetDetailSerializer(serializers.ModelSerializer):
         # Prevent negative targets (if someone sets unrealistic goals)
         return max(round(calorie_target), 1200) # 1200 is a safe minimum floor
     
-    def get_days_left(self, obj):
-        if not obj.aimed_date:
+    def get_days_left(self, obj) -> int:
+        if obj.aimed_date:
+            return max((obj.aimed_date - date.today()).days, 0)
+        # Fallback: estimate days from weight delta at 0.5 kg/week.
+        if obj.weight and obj.aimed_weight:
+            try:
+                delta = abs(float(obj.weight) - float(obj.aimed_weight))
+                if delta == 0:
+                    return 0
+                return max(int(delta / 0.5 * 7), 7)
+            except (ValueError, TypeError):
+                pass
+        return 0
+
+    # --- Macronutrient targets (grams/day) ---
+    # Strategy:
+    #   Protein: 1.8 g per kg of body weight (fitness app standard, 1.6-2.2 range)
+    #   Fat:     30% of total calories, divided by 9 kcal/g
+    #   Carbs:   remaining calories, divided by 4 kcal/g
+    # Falls back to a 30/40/30 percentage split if weight is missing.
+
+    def get_protein_target(self, obj) -> int:
+        calories = self.get_calorie_target(obj)
+        if calories <= 0:
             return 0
-        return max((obj.aimed_date - date.today()).days, 0)
+        # Protein scales with activity level (ACSM / ISSN guidelines):
+        # - Sedentary:          1.2 g/kg
+        # - Lightly active:     1.6 g/kg
+        # - Moderately active:  2.0 g/kg
+        # - Active:             2.2 g/kg
+        # - Very active:        2.4 g/kg
+        protein_per_kg = {
+            "Sedentary": 1.2,
+            "Lightly active": 1.6,
+            "Moderately active": 2.0,
+            "Active": 2.2,
+            "Very active": 2.4,
+        }.get(obj.life_style, 1.6)
+        if obj.weight:
+            try:
+                return round(float(obj.weight) * protein_per_kg)
+            except (ValueError, TypeError):
+                pass
+        # fallback when weight is missing: 30% of calories
+        return round(calories * 0.30 / 4)
+
+    def get_fat_target(self, obj) -> int:
+        calories = self.get_calorie_target(obj)
+        if calories <= 0:
+            return 0
+        # 30% of calories from fat, 9 kcal/g
+        return round(calories * 0.30 / 9)
+
+    def get_carbs_target(self, obj) -> int:
+        calories = self.get_calorie_target(obj)
+        if calories <= 0:
+            return 0
+        protein_kcal = self.get_protein_target(obj) * 4
+        fat_kcal = self.get_fat_target(obj) * 9
+        remaining = calories - protein_kcal - fat_kcal
+        return max(round(remaining / 4), 0)
+
+    # --- Micronutrient targets (RDA, gender-based where applicable) ---
+    def get_vitamin_targets(self, obj) -> dict:
+        is_male = obj.gender == 'male'
+        return {
+            'vitamin_a': 900 if is_male else 700,   # µg RAE
+            'vitamin_c': 90 if is_male else 75,     # mg
+            'vitamin_d': 15,                        # µg
+            'vitamin_e': 15,                        # mg
+            'vitamin_k': 120 if is_male else 90,    # µg
+        }
+
+    def get_mineral_targets(self, obj) -> dict:
+        is_male = obj.gender == 'male'
+        return {
+            'mineral_calcium': 1000,                # mg
+            'mineral_iron': 8 if is_male else 18,   # mg
+            'mineral_sodium': 2300,                 # mg (upper limit)
+            'mineral_potassium': 3400 if is_male else 2600,  # mg
+            'mineral_zink': 11 if is_male else 8,   # mg
+        }
 
 
