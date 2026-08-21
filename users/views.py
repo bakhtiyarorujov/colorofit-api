@@ -18,6 +18,8 @@ from colorofit.i18n import error_payload
 from rest_framework.generics import UpdateAPIView, RetrieveAPIView, ListAPIView, RetrieveUpdateAPIView, CreateAPIView
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.authentication import JWTAuthentication
 from .serializers import GoogleTokenRequestSerializer, GoogleLoginResponseSerializer \
     , AppleLoginSerializer, AppleLoginResponseSerializer, UserAimDetailSerializer, TargetDetailSerializer \
     , UserProfileSerializer, AlertPreferenceSerializer, FeedbackSerializer, is_profile_complete
@@ -27,10 +29,35 @@ User = get_user_model()
 
 
 # --- OAuth configuration (env-driven, with safe fallbacks) ---
+# NOTE: this fallback is only used if GOOGLE_OAUTH_CLIENT_ID is unset in the
+# environment. 2026-08-21: this had been pointed at project 197516977632 (an
+# unrelated/orphaned GCP project) by a previous "fix" commit — the mobile
+# app's real project is 504818468430 (calorilens-bb4d5). Set the real env var
+# on the server; don't rely on this fallback in production.
 GOOGLE_OAUTH_CLIENT_ID = os.environ.get(
     "GOOGLE_OAUTH_CLIENT_ID",
-    "197516977632-78h87uce10pv6eja01j3atu96sq7oaai.apps.googleusercontent.com",
+    "504818468430-q53sdgsag9i3oe7a898c3trg1nc2fim6.apps.googleusercontent.com",
 )
+
+
+class OptionalJWTAuthentication(JWTAuthentication):
+    """JWTAuthentication that treats a missing/invalid/expired token as
+    "not authenticated" instead of rejecting the whole request.
+
+    GoogleLoginAPIView is `permission_classes = [AllowAny]`, but the project's
+    DEFAULT_AUTHENTICATION_CLASSES (plain JWTAuthentication) still runs first
+    and raises AuthenticationFailed for a bad Authorization header — which
+    DRF turns into a hard 401 *before* AllowAny is ever consulted. The mobile
+    app attaches a guest's access token here (to upgrade that guest account
+    on Google sign-in); if that token happens to be stale/expired, a normal
+    Google login must still succeed instead of getting rejected outright.
+    """
+
+    def authenticate(self, request):
+        try:
+            return super().authenticate(request)
+        except AuthenticationFailed:
+            return None
 
 APPLE_ISSUER = "https://appleid.apple.com"
 APPLE_KEYS_URL = "https://appleid.apple.com/auth/keys"
@@ -179,6 +206,8 @@ def _resolve_google_user(request, email, first_name, last_name):
 
 class GoogleLoginAPIView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = [OptionalJWTAuthentication]
+
     def post(self, request):
         token_id = request.data.get("token")
 
