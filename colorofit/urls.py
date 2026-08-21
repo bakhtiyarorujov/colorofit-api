@@ -21,12 +21,14 @@ from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from food.views import AppVersionView
+from colorofit.legal_views import privacy_policy
 
 
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('app-version/', AppVersionView.as_view(), name='app-version'),
+    path('privacy/', privacy_policy, name='privacy-policy'),
     # YOUR PATTERNS
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     # Optional UI:
