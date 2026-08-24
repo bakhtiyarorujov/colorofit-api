@@ -125,7 +125,14 @@ REST_FRAMEWORK = {
         'user': '1000/day',
         'anon': '60/hour',
         'food_scan': '60/hour',      # Gemini image recognition (costly)
-        'recipe_search': '120/hour',  # Spoonacular proxy (paid quota)
+        # Spoonacular proxy. The real shared daily budget is tiny (50
+        # points/day on the free plan — see SPOONACULAR_DAILY_BUDGET in
+        # food/views.py, which is the primary defense since it's a *global*
+        # ceiling). This per-user rate is just defense-in-depth so one
+        # account alone can't burn through most of that budget in a few
+        # minutes; 120/hour was effectively no limit for a 50-point/day
+        # shared pool.
+        'recipe_search': '20/hour',
     },
     # Consistent, localized error bodies (honors the Accept-Language header):
     # {"error": "<message in caller's language>", "code": "<stable code>"}.

@@ -15,9 +15,20 @@ Run manually after a deploy:
 
     python manage.py warm_recipe_cache
 
-Or, better, set it up as a PythonAnywhere scheduled task (Tasks tab) to run
-roughly once a day — comfortably inside the 3-day cache TTL — so the cache
-never goes fully cold.
+Or, better, set it up as a PythonAnywhere scheduled task (Tasks tab).
+
+IMPORTANT — Spoonacular's real free-plan budget is tiny (50 points/day, per
+their own dashboard), and this command alone can burn through a large chunk
+of it (10 categories x a costly `addRecipeNutrition` search each). Two
+safeguards keep that in check even if the PythonAnywhere task is still set
+to run daily:
+
+1. WARM_LOCK: this command no-ops if it already ran within WARM_LOCK_TTL_SECONDS
+   (set just under the search cache's own TTL), so it only actually spends
+   quota roughly once per that window, not every day.
+2. It shares food.views' SPOONACULAR_DAILY_BUDGET guard with the live search
+   /detail views, so a warm run and real user traffic on the same day draw
+   from one combined daily ceiling instead of each getting their own.
 """
 import time
 
@@ -28,7 +39,12 @@ from django.core.management.base import BaseCommand
 from food.views import (
     RECIPE_CATEGORIES,
     RECIPE_TRANSLATE_LANGS,
+    SEARCH_CACHE_TTL,
     SPOONACULAR_API_KEY,
+    SPOONACULAR_DAILY_BUDGET,
+    _spoonacular_budget_exceeded,
+    _spoonacular_exhaust_budget_for_today,
+    _spoonacular_note_request,
     _translate_search_results,
 )
 
@@ -37,15 +53,37 @@ from food.views import (
 # requests never look up.
 PAGE_SIZE = 20
 
-# Matches the cache TTL in SpoonacularRecipeSearchView (search + translate).
-CACHE_TTL_SECONDS = 60 * 60 * 24 * 3
+# Skip the whole run if the last one was within this window. Kept a bit
+# under SEARCH_CACHE_TTL (7 days) so a run lands shortly before the cache
+# would actually go cold, instead of re-spending the budget every single
+# day the PythonAnywhere task happens to fire.
+WARM_LOCK_KEY = "warm_recipe_cache:last_run"
+WARM_LOCK_TTL_SECONDS = 60 * 60 * 24 * 6  # 6 days
 
 
 class Command(BaseCommand):
     help = "Pre-warms the recipe-search + translation cache for every category chip."
 
     def handle(self, *args, **options):
+        if cache.get(WARM_LOCK_KEY):
+            self.stdout.write(
+                "Skipping — already warmed within the last "
+                f"{WARM_LOCK_TTL_SECONDS // 86400} days. Spoonacular's free-plan "
+                "budget is tiny; re-warming every time this task fires would "
+                "waste most of it on categories nobody may open today. Delete "
+                f"the '{WARM_LOCK_KEY}' cache key (or wait it out) to force a run."
+            )
+            return
+
         for category in RECIPE_CATEGORIES:
+            if _spoonacular_budget_exceeded():
+                self.stdout.write(self.style.WARNING(
+                    f"Today's Spoonacular budget ({SPOONACULAR_DAILY_BUDGET} requests) "
+                    f"is spent — stopping before [{category['key']}]. Remaining "
+                    "categories will warm on a later run or lazily from real traffic."
+                ))
+                break
+
             meal_type = category["type"] or ""
             # Must exactly match the cache_key format built in
             # SpoonacularRecipeSearchView.get() — query/cuisine/diet are
@@ -77,18 +115,30 @@ class Command(BaseCommand):
                     )
                     continue
 
+                _spoonacular_note_request()
+
                 if resp.status_code != 200:
                     self.stderr.write(self.style.ERROR(
                         f"[{category['key']}] Spoonacular error {resp.status_code}: "
                         f"{resp.text[:200]}"
                     ))
+                    if resp.status_code == 402:
+                        # The real plan quota is gone — stop the whole run
+                        # instead of burning through the rest of the
+                        # categories on requests that will all fail the
+                        # same way.
+                        _spoonacular_exhaust_budget_for_today()
+                        self.stdout.write(self.style.WARNING(
+                            "Spoonacular reports the daily quota is exhausted — stopping run."
+                        ))
+                        break
                     continue
 
                 data = resp.json()
                 data["offset"] = 0
                 data["number"] = PAGE_SIZE
                 data["hasMore"] = PAGE_SIZE < data.get("totalResults", 0)
-                cache.set(cache_key, data, CACHE_TTL_SECONDS)
+                cache.set(cache_key, data, SEARCH_CACHE_TTL)
                 self.stdout.write(f"[{category['key']}] base results cached.")
             else:
                 self.stdout.write(f"[{category['key']}] base results already warm.")
@@ -104,10 +154,10 @@ class Command(BaseCommand):
                 # 2 languages); if one gets rate-limited or times out and we
                 # cache its fail-open (still-English) result anyway, that
                 # category+language is then stuck showing English for the
-                # full 3-day TTL, regardless of what language the user
+                # full cache TTL, regardless of what language the user
                 # picks in the app — which is exactly what was happening.
                 if ok:
-                    cache.set(tr_key, translated, CACHE_TTL_SECONDS)
+                    cache.set(tr_key, translated, SEARCH_CACHE_TTL)
                     self.stdout.write(
                         self.style.SUCCESS(f"[{category['key']}] {lang_code} translated + cached.")
                     )
@@ -117,7 +167,9 @@ class Command(BaseCommand):
                         "not caching, will retry on a later run or a live request."
                     ))
                 # A short pause between Gemini calls so a burst of ~20 in a
-                # row doesn't trip a per-minute rate limit itself.
+                # row doesn't trip a per-minute rate limit itself. (Gemini
+                # calls don't touch the Spoonacular budget above.)
                 time.sleep(1)
 
+        cache.set(WARM_LOCK_KEY, True, WARM_LOCK_TTL_SECONDS)
         self.stdout.write(self.style.SUCCESS("Done."))

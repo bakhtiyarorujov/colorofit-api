@@ -29,6 +29,24 @@ SPOONACULAR_API_KEY = os.environ.get("SPOONACULAR_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# Spoonacular's real free-plan budget is tiny (50 points/day, per their own
+# dashboard — not the 150 this file used to assume), and `addRecipeNutrition`
+# makes a single search cost several points, so a handful of real requests
+# can exhaust an entire day's budget. SPOONACULAR_DAILY_BUDGET below is a
+# self-imposed ceiling on upstream *requests* (not exact points — Spoonacular
+# doesn't publish a precise per-endpoint formula), kept safely under the real
+# plan limit so we stop calling Spoonacular ourselves once we're close,
+# instead of finding out one 402 at a time. Override via env once the plan is
+# upgraded (or to tune it against observed usage on the Spoonacular console).
+SPOONACULAR_DAILY_BUDGET = int(os.environ.get("SPOONACULAR_DAILY_BUDGET", "15"))
+
+# How long we trust a cached Spoonacular response before treating it as
+# stale. Recipe search results and recipe info barely change day to day, so
+# both are generous — the whole point is to spend the tiny daily budget on
+# recipes nobody has asked for yet, not on re-fetching ones we already have.
+SEARCH_CACHE_TTL = 60 * 60 * 24 * 7    # 7 days (was 3)
+DETAIL_CACHE_TTL = 60 * 60 * 24 * 30   # 30 days (was 24h) — a recipe's info is effectively immutable.
+
 # Meal type mapping
 MEAL_TYPE_MAPPING = {
     'breakfast': 'Breakfast',
@@ -385,6 +403,13 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
     recipe = cache.get(cache_key)
 
     if recipe is None:
+        # Same self-imposed budget as the detail/search views (see
+        # SPOONACULAR_DAILY_BUDGET) — Add-recipe shares the same Spoonacular
+        # account, so a cache miss here should be gated too, not just the
+        # views that go through DRF Response directly.
+        if _spoonacular_budget_exceeded():
+            raise SpoonacularAPIError("Spoonacular daily budget reached")
+
         url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
         params = {
             "includeNutrition": "true",
@@ -396,8 +421,11 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
         except rq.exceptions.RequestException as e:
             raise SpoonacularAPIError(f"Spoonacular API request failed: {str(e)}") from e
 
+        _spoonacular_note_request()
         if response.status_code != 200:
             error_text = response.text[:200] if response.text else "No error details"
+            if response.status_code == 402:
+                _spoonacular_exhaust_budget_for_today()
             raise SpoonacularAPIError(f"Spoonacular API error: {response.status_code} - {error_text}")
 
         try:
@@ -405,7 +433,7 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
         except ValueError as e:
             raise SpoonacularDataError(f"Invalid JSON response from Spoonacular API: {str(e)}") from e
 
-        cache.set(cache_key, recipe, 60 * 60 * 24)  # 24h, shared with the detail view
+        cache.set(cache_key, recipe, DETAIL_CACHE_TTL)  # shared with the detail view
 
     nutrition = recipe.get("nutrition", {})
     
@@ -1227,6 +1255,60 @@ def _spoonacular_error_response(resp):
                      status=status.HTTP_502_BAD_GATEWAY)
 
 
+# ---------------------------------------------------------------------------
+# Self-imposed daily budget for live Spoonacular calls. This is deliberately
+# a rough request counter, not a precise points ledger — see
+# SPOONACULAR_DAILY_BUDGET above. `warm_recipe_cache` shares it (imports
+# these three) so a warm run and real traffic on the same day draw from one
+# combined ceiling instead of each getting their own.
+# ---------------------------------------------------------------------------
+
+def _spoonacular_budget_key():
+    return f'spoon_budget:{date.today().isoformat()}'
+
+
+def _spoonacular_budget_exceeded():
+    return (cache.get(_spoonacular_budget_key()) or 0) >= SPOONACULAR_DAILY_BUDGET
+
+
+def _spoonacular_note_request():
+    """Record one live upstream Spoonacular call against today's budget.
+
+    `cache.add` + `cache.incr` keeps this correct across the day boundary
+    (a fresh key each date) without needing a scheduled reset. Not
+    perfectly atomic under concurrent workers on every cache backend, but
+    this is a soft self-protection budget with margin built in
+    (SPOONACULAR_DAILY_BUDGET is already well under the real plan limit),
+    not a hard billing meter — an occasional off-by-one under concurrency
+    is fine.
+    """
+    key = _spoonacular_budget_key()
+    if not cache.add(key, 1, 60 * 60 * 25):
+        try:
+            cache.incr(key)
+        except ValueError:
+            cache.set(key, 1, 60 * 60 * 25)
+
+
+def _spoonacular_exhaust_budget_for_today():
+    """Force today's counter to the ceiling. Called when Spoonacular itself
+    returns 402 — that's Spoonacular telling us the real quota is gone, so
+    stop attempting further live calls for the rest of the day instead of
+    re-discovering the same 402 on every subsequent request (or retry)."""
+    cache.set(_spoonacular_budget_key(), SPOONACULAR_DAILY_BUDGET, 60 * 60 * 25)
+
+
+def _budget_exceeded_response():
+    """Same shape as _spoonacular_error_response's 429, returned without
+    even calling Spoonacular — once today's self-imposed budget is spent,
+    there's nothing to gain from spending the round trip to find out again."""
+    return Response(
+        {'detail': 'Recipe search is temporarily unavailable — daily quota reached.',
+         'status': 402},
+        status=status.HTTP_429_TOO_MANY_REQUESTS,
+    )
+
+
 class SpoonacularRecipeSearchView(APIView):
     """
     GET /food/recipes/search/?query=<term>&number=<n>&offset=<o>
@@ -1246,7 +1328,13 @@ class SpoonacularRecipeSearchView(APIView):
     MAX_PAGE_SIZE = 20
 
     def get(self, request):
-        query = request.query_params.get('query', '').strip()
+        # Normalize free-text queries (lowercase, collapsed whitespace) so
+        # "Chicken", " chicken ", "CHICKEN" all land on the same cache_key
+        # instead of each paying for its own live Spoonacular call. Category
+        # browsing (the chips) already collapses onto a handful of fixed
+        # keys; free text is the one search path that doesn't, so it's the
+        # one most worth normalizing.
+        query = ' '.join(request.query_params.get('query', '').strip().lower().split())
 
         def _int_param(name, default, minimum=0):
             raw = request.query_params.get(name, str(default))
@@ -1268,15 +1356,22 @@ class SpoonacularRecipeSearchView(APIView):
 
         sort = sort or 'popularity'
         # Cache identical searches (now per-page, via offset). Spoonacular's free
-        # plan is a shared 150 points/day budget across ALL users, so without this
-        # a few users browsing would exhaust it. Recipe results barely change, so
-        # a 12h TTL is safe and cuts upstream calls (and cost) dramatically.
+        # plan is a shared 50 points/day budget across ALL users (see
+        # SPOONACULAR_DAILY_BUDGET above), so without this a handful of users
+        # browsing would exhaust it in minutes. Recipe results barely change,
+        # so a long TTL is safe and cuts upstream calls (and cost) dramatically.
         cache_key = f'spoon_search:{query}|{number}|{offset}|{meal_type}|{cuisine}|{diet}|{sort}'
         data = cache.get(cache_key)
 
         # No query/filter is allowed — complexSearch then returns popular recipes,
         # which powers the "All" category browse.
         if data is None:
+            if _spoonacular_budget_exceeded():
+                logger.warning(
+                    'Spoonacular daily budget (%s requests) reached — skipping live search call.',
+                    SPOONACULAR_DAILY_BUDGET,
+                )
+                return _budget_exceeded_response()
             try:
                 params = {
                     'number': number,
@@ -1299,8 +1394,11 @@ class SpoonacularRecipeSearchView(APIView):
                     params=params,
                     timeout=15,
                 )
+                _spoonacular_note_request()
                 if resp.status_code != 200:
                     logger.warning('Spoonacular search error %s: %s', resp.status_code, resp.text[:200])
+                    if resp.status_code == 402:
+                        _spoonacular_exhaust_budget_for_today()
                     return _spoonacular_error_response(resp)
                 data = resp.json()
                 # Surface pagination info explicitly so the mobile app knows
@@ -1308,17 +1406,21 @@ class SpoonacularRecipeSearchView(APIView):
                 data['offset'] = offset
                 data['number'] = number
                 data['hasMore'] = (offset + number) < data.get('totalResults', 0)
-                # 3 days (was 12h) — popularity-sorted results barely change,
-                # and a longer TTL means fewer live Spoonacular+Gemini round
-                # trips (each several seconds) for real users.
-                cache.set(cache_key, data, 60 * 60 * 24 * 3)
+                # Popularity-sorted results barely change, and a longer TTL
+                # means fewer live Spoonacular+Gemini round trips (each
+                # several seconds, and each costing part of a very small
+                # daily budget) for real users.
+                cache.set(cache_key, data, SEARCH_CACHE_TTL)
             except rq.RequestException as e:
                 logger.exception('Spoonacular search exception: %s', e)
                 return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
 
         # Localize result titles to the caller's language (Accept-Language, or an
         # explicit ?lang override). Spoonacular is English-only, so titles are
-        # batch-translated once per (search, language) and cached 3 days.
+        # batch-translated once per (search, language) and cached alongside
+        # the search results (Gemini translation doesn't touch the Spoonacular
+        # budget, but keeping the TTLs equal avoids re-translating a search
+        # that's still cached).
         lang = (request.query_params.get('lang') or resolve_language(request)).strip().lower()
         if lang in RECIPE_TRANSLATE_LANGS and GEMINI_API_KEY:
             tr_key = f'{cache_key}|tr:{lang}'
@@ -1327,14 +1429,14 @@ class SpoonacularRecipeSearchView(APIView):
                 translated, ok = _translate_search_results(data, RECIPE_TRANSLATE_LANGS[lang])
                 # Only cache a translation that actually succeeded. Caching a
                 # failed (fail-open, still-English) result here would poison
-                # every request for this category+language for the full 3
-                # days — exactly what was making some categories show up
+                # every request for this category+language for the full TTL
+                # — exactly what was making some categories show up
                 # untranslated regardless of the selected language. On
                 # failure we still answer this one request (with the
                 # English fallback) but leave nothing cached, so the next
                 # request retries Gemini instead of repeating the failure.
                 if ok:
-                    cache.set(tr_key, translated, 60 * 60 * 24 * 3)  # 3 days, see above
+                    cache.set(tr_key, translated, SEARCH_CACHE_TTL)
             data = translated
 
         return Response(data, status=status.HTTP_200_OK)
@@ -1349,10 +1451,16 @@ class SpoonacularRecipeDetailView(APIView):
     throttle_scope = 'recipe_search'
 
     def get(self, request, recipe_id):
-        # A recipe's details are effectively immutable — cache 24h to spare quota.
+        # A recipe's details are effectively immutable — cache a long time to spare quota.
         cache_key = f'spoon_detail:{recipe_id}'
         data = cache.get(cache_key)
         if data is None:
+            if _spoonacular_budget_exceeded():
+                logger.warning(
+                    'Spoonacular daily budget (%s requests) reached — skipping live detail call.',
+                    SPOONACULAR_DAILY_BUDGET,
+                )
+                return _budget_exceeded_response()
             try:
                 resp = rq.get(
                     f'https://api.spoonacular.com/recipes/{recipe_id}/information',
@@ -1362,18 +1470,22 @@ class SpoonacularRecipeDetailView(APIView):
                     },
                     timeout=15,
                 )
+                _spoonacular_note_request()
                 if resp.status_code != 200:
                     logger.warning('Spoonacular detail error %s: %s', resp.status_code, resp.text[:200])
+                    if resp.status_code == 402:
+                        _spoonacular_exhaust_budget_for_today()
                     return _spoonacular_error_response(resp)
                 data = resp.json()
-                cache.set(cache_key, data, 60 * 60 * 24)  # 24 hours
+                cache.set(cache_key, data, DETAIL_CACHE_TTL)
             except rq.RequestException as e:
                 logger.exception('Spoonacular detail exception: %s', e)
                 return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
 
         # Optional translation of title/ingredients/steps. Done once per
-        # (recipe, language) and cached ~30 days — so each recipe hits Gemini at
-        # most once per language, keeping cost/latency tiny.
+        # (recipe, language) and cached alongside the recipe itself — so
+        # each recipe hits Gemini at most once per language, keeping
+        # cost/latency tiny (this doesn't touch the Spoonacular budget).
         lang = (request.query_params.get('lang') or resolve_language(request)).strip().lower()
         if lang in RECIPE_TRANSLATE_LANGS and GEMINI_API_KEY:
             tr_key = f'recipe_tr:{recipe_id}:{lang}'
@@ -1382,9 +1494,9 @@ class SpoonacularRecipeDetailView(APIView):
                 translated, ok = _translate_recipe(data, RECIPE_TRANSLATE_LANGS[lang])
                 # Same reasoning as the search endpoint: never cache a failed
                 # translation as if it were the real thing, or this recipe
-                # stays stuck in English for this language for 30 days.
+                # stays stuck in English for this language for the full TTL.
                 if ok:
-                    cache.set(tr_key, translated, 60 * 60 * 24 * 30)  # 30 days
+                    cache.set(tr_key, translated, DETAIL_CACHE_TTL)
             data = translated
 
         return Response(data, status=status.HTTP_200_OK)
