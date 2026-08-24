@@ -1202,6 +1202,31 @@ class WaterIntakeGoalPreferenceUpdateView(generics.UpdateAPIView):
 # Spoonacular proxy (keeps the API key server-side, off the mobile binary)
 # ---------------------------------------------------------------------------
 
+def _spoonacular_error_response(resp):
+    """Map a non-200 Spoonacular response onto the response we send the app.
+
+    402 (the free/paid plan's daily point quota is exhausted) and 429
+    (Spoonacular itself rate-limiting us) are not "the server is broken" —
+    they're the same "too many requests, try later" situation the app
+    already has a dedicated UI for via our own 429 (see RecipeError /
+    'rate_limit' in the Flutter client). Returning our own 429 here instead
+    of a generic 502 lets that existing handling show "please wait" instead
+    of the generic offline/connection-error message, which is misleading
+    for what is actually a quota problem, not a network problem.
+
+    Anything else upstream (a genuine 5xx, malformed response, etc.) keeps
+    the previous 502 passthrough — that really is "something is broken".
+    """
+    if resp.status_code in (402, 429):
+        return Response(
+            {'detail': 'Recipe search is temporarily unavailable — quota reached.',
+             'status': resp.status_code},
+            status=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+    return Response({'detail': 'Upstream error', 'status': resp.status_code},
+                     status=status.HTTP_502_BAD_GATEWAY)
+
+
 class SpoonacularRecipeSearchView(APIView):
     """
     GET /food/recipes/search/?query=<term>&number=<n>&offset=<o>
@@ -1276,8 +1301,7 @@ class SpoonacularRecipeSearchView(APIView):
                 )
                 if resp.status_code != 200:
                     logger.warning('Spoonacular search error %s: %s', resp.status_code, resp.text[:200])
-                    return Response({'detail': 'Upstream error', 'status': resp.status_code},
-                                    status=status.HTTP_502_BAD_GATEWAY)
+                    return _spoonacular_error_response(resp)
                 data = resp.json()
                 # Surface pagination info explicitly so the mobile app knows
                 # whether to request another page (offset += number).
@@ -1340,8 +1364,7 @@ class SpoonacularRecipeDetailView(APIView):
                 )
                 if resp.status_code != 200:
                     logger.warning('Spoonacular detail error %s: %s', resp.status_code, resp.text[:200])
-                    return Response({'detail': 'Upstream error', 'status': resp.status_code},
-                                    status=status.HTTP_502_BAD_GATEWAY)
+                    return _spoonacular_error_response(resp)
                 data = resp.json()
                 cache.set(cache_key, data, 60 * 60 * 24)  # 24 hours
             except rq.RequestException as e:
