@@ -19,6 +19,8 @@ Or, better, set it up as a PythonAnywhere scheduled task (Tasks tab) to run
 roughly once a day — comfortably inside the 3-day cache TTL — so the cache
 never goes fully cold.
 """
+import time
+
 import requests as rq
 from django.core.cache import cache
 from django.core.management.base import BaseCommand
@@ -96,10 +98,26 @@ class Command(BaseCommand):
                 if cache.get(tr_key) is not None:
                     self.stdout.write(f"[{category['key']}] {lang_code} already warm.")
                     continue
-                translated = _translate_search_results(data, lang_name)
-                cache.set(tr_key, translated, CACHE_TTL_SECONDS)
-                self.stdout.write(
-                    self.style.SUCCESS(f"[{category['key']}] {lang_code} translated + cached.")
-                )
+                translated, ok = _translate_search_results(data, lang_name)
+                # Only cache a translation that actually succeeded. This
+                # loop fires ~20 Gemini calls back-to-back (10 categories x
+                # 2 languages); if one gets rate-limited or times out and we
+                # cache its fail-open (still-English) result anyway, that
+                # category+language is then stuck showing English for the
+                # full 3-day TTL, regardless of what language the user
+                # picks in the app — which is exactly what was happening.
+                if ok:
+                    cache.set(tr_key, translated, CACHE_TTL_SECONDS)
+                    self.stdout.write(
+                        self.style.SUCCESS(f"[{category['key']}] {lang_code} translated + cached.")
+                    )
+                else:
+                    self.stderr.write(self.style.WARNING(
+                        f"[{category['key']}] {lang_code} translation failed — "
+                        "not caching, will retry on a later run or a live request."
+                    ))
+                # A short pause between Gemini calls so a burst of ~20 in a
+                # row doesn't trip a per-minute rate limit itself.
+                time.sleep(1)
 
         self.stdout.write(self.style.SUCCESS("Done."))

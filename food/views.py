@@ -1294,14 +1294,23 @@ class SpoonacularRecipeSearchView(APIView):
 
         # Localize result titles to the caller's language (Accept-Language, or an
         # explicit ?lang override). Spoonacular is English-only, so titles are
-        # batch-translated once per (search, language) and cached 12h.
+        # batch-translated once per (search, language) and cached 3 days.
         lang = (request.query_params.get('lang') or resolve_language(request)).strip().lower()
         if lang in RECIPE_TRANSLATE_LANGS and GEMINI_API_KEY:
             tr_key = f'{cache_key}|tr:{lang}'
             translated = cache.get(tr_key)
             if translated is None:
-                translated = _translate_search_results(data, RECIPE_TRANSLATE_LANGS[lang])
-                cache.set(tr_key, translated, 60 * 60 * 24 * 3)  # 3 days, see above
+                translated, ok = _translate_search_results(data, RECIPE_TRANSLATE_LANGS[lang])
+                # Only cache a translation that actually succeeded. Caching a
+                # failed (fail-open, still-English) result here would poison
+                # every request for this category+language for the full 3
+                # days — exactly what was making some categories show up
+                # untranslated regardless of the selected language. On
+                # failure we still answer this one request (with the
+                # English fallback) but leave nothing cached, so the next
+                # request retries Gemini instead of repeating the failure.
+                if ok:
+                    cache.set(tr_key, translated, 60 * 60 * 24 * 3)  # 3 days, see above
             data = translated
 
         return Response(data, status=status.HTTP_200_OK)
@@ -1347,8 +1356,12 @@ class SpoonacularRecipeDetailView(APIView):
             tr_key = f'recipe_tr:{recipe_id}:{lang}'
             translated = cache.get(tr_key)
             if translated is None:
-                translated = _translate_recipe(data, RECIPE_TRANSLATE_LANGS[lang])
-                cache.set(tr_key, translated, 60 * 60 * 24 * 30)  # 30 days
+                translated, ok = _translate_recipe(data, RECIPE_TRANSLATE_LANGS[lang])
+                # Same reasoning as the search endpoint: never cache a failed
+                # translation as if it were the real thing, or this recipe
+                # stays stuck in English for this language for 30 days.
+                if ok:
+                    cache.set(tr_key, translated, 60 * 60 * 24 * 30)  # 30 days
             data = translated
 
         return Response(data, status=status.HTTP_200_OK)
@@ -1364,10 +1377,17 @@ RECIPE_TRANSLATE_LANGS = {'az': 'Azerbaijani', 'ru': 'Russian'}
 
 
 def _gemini_translate_batch(strings, language):
-    """Translate a list of strings to `language`; returns a same-length list.
-    Falls back to the originals on any error (fail-open)."""
+    """Translate a list of strings to `language`; returns `(result, ok)`.
+
+    `result` is a same-length list — the real translations when `ok` is
+    True, or the untouched originals (fail-open) when `ok` is False. Callers
+    must check `ok` before caching: caching a fail-open (still-English)
+    result as if it were the translation is what let a single rate-limited
+    or timed-out Gemini call get stuck as "the Russian/Azerbaijani version"
+    of a category for days.
+    """
     if not strings:
-        return strings
+        return strings, True
     try:
         import json as _json
         prompt = (
@@ -1387,20 +1407,24 @@ def _gemini_translate_batch(strings, language):
         )
         if resp.status_code != 200:
             logger.warning('Gemini translate error %s: %s', resp.status_code, resp.text[:200])
-            return strings
+            return strings, False
         text = resp.json()['candidates'][0]['content']['parts'][0]['text']
         out = _json.loads(text)
         if isinstance(out, list) and len(out) == len(strings):
-            return [str(x) for x in out]
-        return strings
+            return [str(x) for x in out], True
+        logger.warning('Gemini translate returned malformed output: %r', text[:200])
+        return strings, False
     except Exception as e:  # noqa: BLE001 — never fail the request over translation
         logger.warning('Gemini translate exception: %s', e)
-        return strings
+        return strings, False
 
 
 def _translate_recipe(data, language):
-    """Return a copy of the Spoonacular recipe dict with title, ingredient
-    `original` lines and instruction `step` texts translated to `language`."""
+    """Return `(copy_with_translations, ok)` for the Spoonacular recipe dict,
+    with title, ingredient `original` lines and instruction `step` texts
+    translated to `language`. `ok` is False when the Gemini call failed —
+    the copy is then just the untranslated original, and callers must not
+    cache it as the (language) version."""
     import copy
     out = copy.deepcopy(data)
 
@@ -1426,9 +1450,11 @@ def _translate_recipe(data, language):
                 strings.append(str(step['step']))
 
     if not strings:
-        return out
+        return out, True
 
-    translations = _gemini_translate_batch(strings, language)
+    translations, ok = _gemini_translate_batch(strings, language)
+    if not ok:
+        return out, False
 
     for slot, value in zip(slots, translations):
         kind, i, si = slot
@@ -1439,30 +1465,34 @@ def _translate_recipe(data, language):
         elif kind == 'step':
             out['analyzedInstructions'][i]['steps'][si]['step'] = value
 
-    return out
+    return out, True
 
 
 def _translate_search_results(data, language):
-    """Return a copy of a complexSearch response with each result's `title`
-    translated to `language`. Only titles are shown in the list, so we batch
-    just those in a single Gemini call (fail-open: originals on any error)."""
+    """Return `(copy_with_translated_titles, ok)` for a complexSearch
+    response, translating each result's `title` to `language`. Only titles
+    are shown in the list, so we batch just those in a single Gemini call.
+    `ok` is False when that call failed (fail-open originals) — callers must
+    not cache the result as the (language) version in that case."""
     import copy
     out = copy.deepcopy(data)
     results = out.get('results')
     if not isinstance(results, list) or not results:
-        return out
+        return out, True
 
     indexes = [i for i, r in enumerate(results)
                if isinstance(r, dict) and r.get('title')]
     if not indexes:
-        return out
+        return out, True
 
     titles = [str(results[i]['title']) for i in indexes]
-    translations = _gemini_translate_batch(titles, language)
+    translations, ok = _gemini_translate_batch(titles, language)
+    if not ok:
+        return out, False
     for i, value in zip(indexes, translations):
         results[i]['title'] = value
 
-    return out
+    return out, True
 
 
 # ---------------------------------------------------------------------------
