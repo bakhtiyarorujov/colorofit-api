@@ -1190,15 +1190,36 @@ class WaterIntakeGoalPreferenceUpdateView(generics.UpdateAPIView):
 
 class SpoonacularRecipeSearchView(APIView):
     """
-    GET /food/recipes/search/?query=<term>&number=<n>
+    GET /food/recipes/search/?query=<term>&number=<n>&offset=<o>
     Proxies Spoonacular complexSearch with nutrition included.
+
+    Paginated: the mobile app should request a small `number` (default/max
+    20) for the first screen, then increase `offset` by `number` on each
+    subsequent page as the user scrolls. This keeps each response — and the
+    one-time translation pass on a cache miss — small and fast, instead of
+    the old behaviour of always fetching (and translating) 50 recipes at once.
     """
     permission_classes = [IsAuthenticated]
     throttle_scope = 'recipe_search'
 
+    # Hard cap regardless of what the client asks for, so a bad/old client
+    # build can't fall back into the slow "fetch 50" behaviour.
+    MAX_PAGE_SIZE = 20
+
     def get(self, request):
         query = request.query_params.get('query', '').strip()
-        number = request.query_params.get('number', '50')
+
+        def _int_param(name, default, minimum=0):
+            raw = request.query_params.get(name, str(default))
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return default
+            return max(minimum, value)
+
+        number = min(_int_param('number', 20, minimum=1), self.MAX_PAGE_SIZE)
+        offset = _int_param('offset', 0, minimum=0)
+
         # Optional filters (forwarded to Spoonacular complexSearch). Browsing by
         # category alone is valid, so a query is only required when no filter is set.
         meal_type = request.query_params.get('type', '').strip()
@@ -1207,11 +1228,11 @@ class SpoonacularRecipeSearchView(APIView):
         sort = request.query_params.get('sort', '').strip()
 
         sort = sort or 'popularity'
-        # Cache identical searches. Spoonacular's free plan is a shared 150
-        # points/day budget across ALL users, so without this a few users
-        # browsing would exhaust it. Recipe results barely change, so a 12h TTL
-        # is safe and cuts upstream calls (and cost) dramatically.
-        cache_key = f'spoon_search:{query}|{number}|{meal_type}|{cuisine}|{diet}|{sort}'
+        # Cache identical searches (now per-page, via offset). Spoonacular's free
+        # plan is a shared 150 points/day budget across ALL users, so without this
+        # a few users browsing would exhaust it. Recipe results barely change, so
+        # a 12h TTL is safe and cuts upstream calls (and cost) dramatically.
+        cache_key = f'spoon_search:{query}|{number}|{offset}|{meal_type}|{cuisine}|{diet}|{sort}'
         data = cache.get(cache_key)
 
         # No query/filter is allowed — complexSearch then returns popular recipes,
@@ -1220,6 +1241,7 @@ class SpoonacularRecipeSearchView(APIView):
             try:
                 params = {
                     'number': number,
+                    'offset': offset,
                     'addRecipeNutrition': 'true',
                     'apiKey': SPOONACULAR_API_KEY,
                     'sort': sort,
@@ -1243,6 +1265,11 @@ class SpoonacularRecipeSearchView(APIView):
                     return Response({'detail': 'Upstream error', 'status': resp.status_code},
                                     status=status.HTTP_502_BAD_GATEWAY)
                 data = resp.json()
+                # Surface pagination info explicitly so the mobile app knows
+                # whether to request another page (offset += number).
+                data['offset'] = offset
+                data['number'] = number
+                data['hasMore'] = (offset + number) < data.get('totalResults', 0)
                 cache.set(cache_key, data, 60 * 60 * 12)  # 12 hours (shared English base)
             except rq.RequestException as e:
                 logger.exception('Spoonacular search exception: %s', e)
