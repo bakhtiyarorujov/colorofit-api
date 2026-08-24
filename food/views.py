@@ -1284,7 +1284,10 @@ class SpoonacularRecipeSearchView(APIView):
                 data['offset'] = offset
                 data['number'] = number
                 data['hasMore'] = (offset + number) < data.get('totalResults', 0)
-                cache.set(cache_key, data, 60 * 60 * 12)  # 12 hours (shared English base)
+                # 3 days (was 12h) — popularity-sorted results barely change,
+                # and a longer TTL means fewer live Spoonacular+Gemini round
+                # trips (each several seconds) for real users.
+                cache.set(cache_key, data, 60 * 60 * 24 * 3)
             except rq.RequestException as e:
                 logger.exception('Spoonacular search exception: %s', e)
                 return Response({'detail': 'Network error'}, status=status.HTTP_502_BAD_GATEWAY)
@@ -1298,7 +1301,7 @@ class SpoonacularRecipeSearchView(APIView):
             translated = cache.get(tr_key)
             if translated is None:
                 translated = _translate_search_results(data, RECIPE_TRANSLATE_LANGS[lang])
-                cache.set(tr_key, translated, 60 * 60 * 12)
+                cache.set(tr_key, translated, 60 * 60 * 24 * 3)  # 3 days, see above
             data = translated
 
         return Response(data, status=status.HTTP_200_OK)
