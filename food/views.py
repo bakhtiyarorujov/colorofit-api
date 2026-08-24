@@ -362,36 +362,50 @@ def get_spoonacular_recipe_by_id(recipe_id: int):
     """
     Get nutrition data from Spoonacular API by recipe ID.
     Uses recipe information endpoint with includeNutrition=true.
-    
+
+    Shares SpoonacularRecipeDetailView's 24h cache (`spoon_detail:<id>`) — a
+    recipe's nutrition is effectively immutable, and the normal flow is the
+    user opens the recipe's detail page (which populates this cache) before
+    tapping Add. Previously this always made a fresh, uncached Spoonacular
+    call, so Add was slow (full round trip to Spoonacular) even right after
+    viewing the same recipe's — now cached, this reuses the cache-hit and
+    also warms it on a miss, so a later Add or detail view is fast too.
+
     Args:
         recipe_id: Spoonacular recipe ID
-        
+
     Returns:
         Dictionary with nutrition data
-        
+
     Raises:
         SpoonacularAPIError: If API request fails
         SpoonacularDataError: If data parsing fails
     """
-    url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
-    params = {
-        "includeNutrition": "true",
-        "apiKey": SPOONACULAR_API_KEY
-    }
+    cache_key = f'spoon_detail:{recipe_id}'
+    recipe = cache.get(cache_key)
 
-    try:
-        response = rq.get(url, params=params, timeout=30)
-    except rq.exceptions.RequestException as e:
-        raise SpoonacularAPIError(f"Spoonacular API request failed: {str(e)}") from e
-    
-    if response.status_code != 200:
-        error_text = response.text[:200] if response.text else "No error details"
-        raise SpoonacularAPIError(f"Spoonacular API error: {response.status_code} - {error_text}")
+    if recipe is None:
+        url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
+        params = {
+            "includeNutrition": "true",
+            "apiKey": SPOONACULAR_API_KEY
+        }
 
-    try:
-        recipe = response.json()
-    except ValueError as e:
-        raise SpoonacularDataError(f"Invalid JSON response from Spoonacular API: {str(e)}") from e
+        try:
+            response = rq.get(url, params=params, timeout=30)
+        except rq.exceptions.RequestException as e:
+            raise SpoonacularAPIError(f"Spoonacular API request failed: {str(e)}") from e
+
+        if response.status_code != 200:
+            error_text = response.text[:200] if response.text else "No error details"
+            raise SpoonacularAPIError(f"Spoonacular API error: {response.status_code} - {error_text}")
+
+        try:
+            recipe = response.json()
+        except ValueError as e:
+            raise SpoonacularDataError(f"Invalid JSON response from Spoonacular API: {str(e)}") from e
+
+        cache.set(cache_key, recipe, 60 * 60 * 24)  # 24h, shared with the detail view
 
     nutrition = recipe.get("nutrition", {})
     
